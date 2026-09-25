@@ -1,14 +1,21 @@
 import { useEffect, useState } from "react";
 import type { Product } from "../lib/types";
+import { FilterBar } from "./FilterBar";
+
+type ListSource = "all" | "filter";
 
 export function ProductsView() {
-  const [products, setProducts] = useState<Product[] | null>(null);
+  const [all, setAll] = useState<Product[] | null>(null);
+  const [items, setItems] = useState<Product[] | null>(null);
+  const [source, setSource] = useState<ListSource>("all");
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [selected, setSelected] = useState<Product | null>(null);
   const [listStatus, setListStatus] = useState<"HIT" | "MISS" | null>(null);
+  const [filterStatus, setFilterStatus] = useState<"HIT" | "MISS" | null>(null);
   const [detailStatus, setDetailStatus] = useState<"HIT" | "MISS" | null>(null);
   const [listError, setListError] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const [filterLoading, setFilterLoading] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -20,7 +27,10 @@ export function ProductsView() {
         const status = res.headers.get("X-Cache") === "HIT" ? "HIT" : "MISS";
         setListStatus(status);
         const data = await res.json();
-        if (alive) setProducts(data.products);
+        if (alive) {
+          setAll(data.products);
+          setItems(data.products);
+        }
       } catch (e) {
         if (alive) setListError(String(e));
       }
@@ -29,6 +39,36 @@ export function ProductsView() {
       alive = false;
     };
   }, []);
+
+  async function applyFilter(opts: { name_substr: string; min_price?: number; max_price?: number }) {
+    setFilterLoading(true);
+    setFilterStatus(null);
+    try {
+      const res = await fetch("/products/filter", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(opts),
+      });
+      const status = res.headers.get("X-Cache") === "HIT" ? "HIT" : "MISS";
+      setFilterStatus(status);
+      const data = (await res.json()) as { products: Product[]; count: number };
+      setItems(data.products);
+      setSource("filter");
+      setSelectedId(null);
+      setSelected(null);
+    } finally {
+      setFilterLoading(false);
+    }
+  }
+
+  function clearFilter() {
+    setSource("all");
+    setItems(all);
+    setFilterStatus(null);
+    setSelectedId(null);
+    setSelected(null);
+  }
 
   async function openDetail(id: number) {
     setSelectedId(id);
@@ -48,30 +88,44 @@ export function ProductsView() {
   if (listError) {
     return <ErrorBlock message={listError} />;
   }
-  if (!products) {
+  if (!items) {
     return <Skeleton />;
   }
+
+  const empty = items.length === 0;
 
   return (
     <div className="space-y-10">
       <SectionHead
         kicker="Index"
-        title="Products"
-        meta={listStatus === "HIT" ? "served from cache" : "fresh from Supabase"}
-        accent={listStatus === "HIT" ? "rust" : "ink"}
+        title={source === "filter" ? "Filtered" : "Products"}
+        meta={source === "filter" ? `${items.length} match` : `${items.length} in catalogue`}
       />
 
-      <ul className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-px bg-rule border border-rule">
-        {products.map((p, i) => (
-          <ProductCard
-            key={p.id}
-            product={p}
-            index={i}
-            selected={selectedId === p.id}
-            onClick={() => openDetail(p.id)}
-          />
-        ))}
-      </ul>
+      <FilterBar
+        onSubmit={applyFilter}
+        onClear={clearFilter}
+        status={filterStatus}
+        loading={filterLoading}
+      />
+
+      {empty ? (
+        <div className="border border-dashed border-rule p-12 text-center text-taupe font-display-italic text-[18px]">
+          Nothing matches. Loosen the filters.
+        </div>
+      ) : (
+        <ul className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-px bg-rule border border-rule">
+          {items.map((p, i) => (
+            <ProductCard
+              key={p.id}
+              product={p}
+              index={i}
+              selected={selectedId === p.id}
+              onClick={() => openDetail(p.id)}
+            />
+          ))}
+        </ul>
+      )}
 
       {selected && (
         <div className="border-t border-rule pt-10">

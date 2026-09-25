@@ -8,6 +8,7 @@ export default defineConfig({
     proxy: {
       "/api": "http://localhost:1234",
       "/products": "http://localhost:1234",
+      "/products/filter": "http://localhost:1234",
       "/healthz": "http://localhost:1234",
     },
   },
