@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"net/url"
+	"strconv"
 
 	"github.com/dgraph-io/ristretto"
 	"github.com/joho/godotenv"
@@ -36,7 +38,19 @@ func main() {
 	sessions := NewSessionStore(8)
 
 	registry := NewPrefetchRegistry()
-	registry.Register("GET", "/products", func(ctx context.Context) ([]byte, error) {
+	registry.Register("GET", "/products", func(ctx context.Context, query string) ([]byte, error) {
+		vals, _ := url.ParseQuery(query)
+		if idStr := vals.Get("id"); idStr != "" {
+			id, err := strconv.ParseInt(idStr, 10, 64)
+			if err != nil {
+				return nil, err
+			}
+			p, err := store.GetProduct(ctx, id)
+			if err != nil {
+				return nil, err
+			}
+			return json.Marshal(map[string]ProductWithImageURL{"product": p.WithImageURL(cfg.ImageBaseURL)})
+		}
 		products, err := store.ListProducts(ctx)
 		if err != nil {
 			return nil, err
@@ -47,14 +61,14 @@ func main() {
 		}
 		return json.Marshal(map[string]any{"products": output, "count": len(output)})
 	})
-	registry.Register("GET", "/products/filter", func(ctx context.Context) ([]byte, error) {
+	registry.Register("GET", "/products/filter", func(ctx context.Context, query string) ([]byte, error) {
 		return json.Marshal(map[string]any{"filters": map[string]any{}})
 	})
 
 	e := echo.New()
 	e.Use(PrefetchMiddleware(predictor, cache, registry, sessions, cfg.CacheTTL))
 	e.GET("/products",         ListProductsHandler(store, cfg.ImageBaseURL))
-	e.GET("/products/filter",  FilterProductsPageHandler(store))
+	e.GET("/products/filter",  FilterProductsPageHandler())
 	e.POST("/products/filter", FilterProductsHandler(store, cfg.ImageBaseURL))
 	e.GET("/healthz",HealthHandler)
 	if err := e.Start(cfg.Port); err != nil {

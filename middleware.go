@@ -52,7 +52,9 @@ type cachedResponse struct {
 // PrefetchFunc produces the bytes that should be cached for an endpoint.
 // Implementations must return the exact bytes the matching handler would
 // emit so the cache stays consistent across prefetch and real requests.
-type PrefetchFunc func(ctx context.Context) ([]byte, error)
+// The query argument is the parsed query string from the predicted call
+// (without the leading "?"), or "" when the call had no query.
+type PrefetchFunc func(ctx context.Context, query string) ([]byte, error)
 
 // PrefetchRegistry maps "METHOD /path" to a PrefetchFunc. Predicted calls
 // include their query string, but dispatch is method+path only; the query
@@ -215,7 +217,7 @@ func prefetch(p *Predictor, cache *ristretto.Cache, registry *PrefetchRegistry, 
 		if fn == nil {
 			continue
 		}
-		body, err := fn(context.Background())
+		body, err := fn(context.Background(), query)
 		if err != nil || len(body) == 0 {
 			continue
 		}
