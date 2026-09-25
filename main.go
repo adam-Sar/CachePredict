@@ -38,7 +38,9 @@ func main() {
 		MaxCost:     int64(cfg.CacheMaxEntries) * 64,
 		BufferItems: 64,
 	})
-	if err != nil { log.Fatal(err) }
+	if err != nil {
+		log.Fatal(err)
+	}
 	defer cache.Close()
 	sessions := NewSessionStore(cfg.SessionMaxHist, cfg.SessionMaxCount)
 
@@ -72,10 +74,10 @@ func main() {
 
 	e := echo.New()
 	e.Use(PrefetchMiddleware(predictor, cache, registry, sessions, cfg.CacheTTL, cfg.CookieSecure))
-	e.GET("/products",         ListProductsHandler(store, cfg.ImageBaseURL))
-	e.GET("/products/filter",  FilterProductsPageHandler())
+	e.GET("/products", ListProductsHandler(store, cfg.ImageBaseURL))
+	e.GET("/products/filter", FilterProductsPageHandler())
 	e.POST("/products/filter", FilterProductsHandler(store, cfg.ImageBaseURL))
-	e.GET("/healthz",HealthHandler)
+	e.GET("/healthz", HealthHandler)
 
 	// Run the server in a goroutine so we can intercept shutdown signals
 	// and let in-flight requests drain via Echo's graceful shutdown.
@@ -83,7 +85,7 @@ func main() {
 	defer cancel()
 
 	sc := echo.StartConfig{
-		Address:        cfg.Port,
+		Address:         cfg.Port,
 		GracefulTimeout: cfg.ShutdownTimeout,
 		OnShutdownError: func(err error) {
 			log.Printf("shutdown: %v", err)

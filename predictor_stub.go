@@ -3,8 +3,8 @@
 package main
 
 import (
-"fmt"
-"sort"
+	"fmt"
+	"sort"
 )
 
 // stubBackend is the non-CGO fallback. It returns deterministic predictions
@@ -18,62 +18,62 @@ import (
 //   - remaining slots are filled from the rest of the vocab in stable order;
 //   - probabilities decay as 1/(i+1) so the order is preserved.
 type stubBackend struct {
-tokenizer *Tokenizer
+	tokenizer *Tokenizer
 }
 
 func newBackend(onnxPath string, tok *Tokenizer) (predictorBackend, error) {
-if tok == nil {
-return nil, fmt.Errorf("stub backend: nil tokenizer")
-}
-return &stubBackend{tokenizer: tok}, nil
+	if tok == nil {
+		return nil, fmt.Errorf("stub backend: nil tokenizer")
+	}
+	return &stubBackend{tokenizer: tok}, nil
 }
 
 func (b *stubBackend) Predict(history []string, topK int) ([]Prediction, error) {
-if topK <= 0 || topK > b.tokenizer.VocabSize {
-topK = b.tokenizer.VocabSize
-}
-
-// Pick the "headline" prediction: last history call, or "END" if empty.
-head := "END"
-if n := len(history); n > 0 {
-head = history[n-1]
-if _, ok := b.tokenizer.StringToID[head]; !ok {
-head = "END"
-}
-}
-
-preds := make([]Prediction, 0, topK)
-if _, ok := b.tokenizer.StringToID[head]; ok {
-preds = append(preds, Prediction{Call: head, Prob: 0.5})
-}
-
-// Stable vocab iteration order via sorted keys.
-keys := make([]string, 0, len(b.tokenizer.IDToString))
-for _, k := range b.tokenizer.IDToString {
-keys = append(keys, k)
-}
-sort.Strings(keys)
-
-for _, k := range keys {
-if len(preds) >= topK {
-break
-}
-if k == head {
-continue
-}
-preds = append(preds, Prediction{Call: k, Prob: 0})
-}
-
-// Decay: first prediction gets 0.5, the rest taper strictly below it so
-// callers see a descending probability list. Step is 0.5 / len so that with
-// the head's 0.5 the full list sums to roughly 1.0.
-if len(preds) > 1 {
-	n := float32(len(preds))
-	for i := 1; i < len(preds); i++ {
-		preds[i].Prob = 0.5 * (n - float32(i)) / n
+	if topK <= 0 || topK > b.tokenizer.VocabSize {
+		topK = b.tokenizer.VocabSize
 	}
-}
-return preds, nil
+
+	// Pick the "headline" prediction: last history call, or "END" if empty.
+	head := "END"
+	if n := len(history); n > 0 {
+		head = history[n-1]
+		if _, ok := b.tokenizer.StringToID[head]; !ok {
+			head = "END"
+		}
+	}
+
+	preds := make([]Prediction, 0, topK)
+	if _, ok := b.tokenizer.StringToID[head]; ok {
+		preds = append(preds, Prediction{Call: head, Prob: 0.5})
+	}
+
+	// Stable vocab iteration order via sorted keys.
+	keys := make([]string, 0, len(b.tokenizer.IDToString))
+	for _, k := range b.tokenizer.IDToString {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, k := range keys {
+		if len(preds) >= topK {
+			break
+		}
+		if k == head {
+			continue
+		}
+		preds = append(preds, Prediction{Call: k, Prob: 0})
+	}
+
+	// Decay: first prediction gets 0.5, the rest taper strictly below it so
+	// callers see a descending probability list. Step is 0.5 / len so that with
+	// the head's 0.5 the full list sums to roughly 1.0.
+	if len(preds) > 1 {
+		n := float32(len(preds))
+		for i := 1; i < len(preds); i++ {
+			preds[i].Prob = 0.5 * (n - float32(i)) / n
+		}
+	}
+	return preds, nil
 }
 
 func (b *stubBackend) Close() error { return nil }

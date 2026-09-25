@@ -12,11 +12,11 @@ import (
 
 func TestSplitCall(t *testing.T) {
 	tests := []struct {
-		call      string
-		wantOK    bool
-		wantM     string
-		wantP     string
-		wantQ     string
+		call   string
+		wantOK bool
+		wantM  string
+		wantP  string
+		wantQ  string
 	}{
 		{"GET /products", true, "GET", "/products", ""},
 		{"GET /products?id=44", true, "GET", "/products", "id=44"},
@@ -44,7 +44,7 @@ func TestPrefetchRegistryLookup(t *testing.T) {
 	reg := NewPrefetchRegistry()
 	reg.Register("GET", "/products", func(ctx context.Context, query string) ([]byte, error) {
 		called = true
-		return []byte(`{"ok":true,"q":"`+query+`"}`), nil
+		return []byte(`{"ok":true,"q":"` + query + `"}`), nil
 	})
 
 	t.Run("exact match", func(t *testing.T) {
@@ -136,11 +136,11 @@ func TestRecorderCapturesStatusAndBody(t *testing.T) {
 			wantBody:    `{"error":"missing"}`,
 		},
 		{
-			name:        "implicit 200",
-			body:        `{"ok":true}`,
-			wantStatus:  http.StatusOK,
-			wantCT:      "application/json",
-			wantBody:    `{"ok":true}`,
+			name:       "implicit 200",
+			body:       `{"ok":true}`,
+			wantStatus: http.StatusOK,
+			wantCT:     "application/json",
+			wantBody:   `{"ok":true}`,
 		},
 	}
 	for _, tt := range tests {
