@@ -64,12 +64,14 @@ continue
 preds = append(preds, Prediction{Call: k, Prob: 0})
 }
 
-// Decay: first prediction gets 0.5, the rest split the remaining 0.5.
+// Decay: first prediction gets 0.5, the rest taper strictly below it so
+// callers see a descending probability list. Step is 0.5 / len so that with
+// the head's 0.5 the full list sums to roughly 1.0.
 if len(preds) > 1 {
-step := 0.5 / float32(len(preds)-1)
-for i := 1; i < len(preds); i++ {
-preds[i].Prob = 0.5 - step*float32(i-1)
-}
+	n := float32(len(preds))
+	for i := 1; i < len(preds); i++ {
+		preds[i].Prob = 0.5 * (n - float32(i)) / n
+	}
 }
 return preds, nil
 }
