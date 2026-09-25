@@ -49,10 +49,21 @@ func CacheKey(method, path, rawQuery, body string) string {
 	if rawQuery != "" {
 		canonical += "?" + rawQuery
 	}
-	if body != "" {
+	// GET/HEAD/DELETE/OPTIONS have no defined body semantics; clients that
+	// erroneously attach one (Postman, some proxies) would otherwise miss
+	// every prefetched entry because the predictor warms keys with body="".
+	if body != "" && !isBodylessMethod(method) {
 		canonical += " body=" + body
 	}
 
 	sum := sha256.Sum256([]byte(canonical))
 	return hex.EncodeToString(sum[:])
+}
+
+func isBodylessMethod(method string) bool {
+	switch strings.ToUpper(method) {
+	case "GET", "HEAD", "DELETE", "OPTIONS":
+		return true
+	}
+	return false
 }

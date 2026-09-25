@@ -145,8 +145,11 @@ func PrefetchMiddleware(
 			sessions.AddCall(sid, c.Request().Method+" "+c.Request().URL.Path)
 
 			// Read body once (for cache key) and restore it for the handler.
+			// GET/HEAD/DELETE/OPTIONS carry no defined body, so skip reading
+			// to keep cache keys stable across clients that erroneously
+			// attach one (Postman, some proxies).
 			var body string
-			if c.Request().Body != nil {
+			if c.Request().Body != nil && !isBodylessMethod(c.Request().Method) {
 				b, _ := io.ReadAll(c.Request().Body)
 				body = string(b)
 				c.Request().Body = io.NopCloser(bytes.NewReader(b))
