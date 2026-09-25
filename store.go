@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -132,25 +134,32 @@ func (s *Store) GetProduct(ctx context.Context, id int64) (*Product, error) {
 }
 
 func (s *Store) FilterProducts(ctx context.Context, opts FilterOptions) ([]Product, error) {
-	products, err := s.ListProducts(ctx)
-	if err != nil {
+	var result []Product
+	if err := s.doRequest(ctx, http.MethodGet, "/products", buildFilterQuery(opts), &result); err != nil {
 		return nil, err
 	}
-	filtered := make([]Product, 0, len(products))
-	for _, p := range products {
-		if opts.NameSubstr != "" && !strings.Contains(strings.ToLower(p.Name), strings.ToLower(opts.NameSubstr)) {
-			continue
-		}
-		if opts.MinPrice != nil && p.Price < *opts.MinPrice {
-			continue
-		}
-		if opts.MaxPrice != nil && p.Price > *opts.MaxPrice {
-			continue
-		}
-		filtered = append(filtered, p)
-		if opts.Limit > 0 && len(filtered) >= opts.Limit {
-			break
-		}
+	return result, nil
+}
+
+// buildFilterQuery assembles a PostgREST query string that pushes filtering,
+// price range, and limit down to Supabase instead of doing them client-side.
+// It is the canonical place to translate FilterOptions into the request URL.
+func buildFilterQuery(opts FilterOptions) string {
+	var parts []string
+	parts = append(parts, "select=*", "order=id")
+	if opts.NameSubstr != "" {
+		// ilike.*X* is case-insensitive substring match. Escape the user
+		// input so '%', '_', '&', etc. don't break out of the wildcard.
+		parts = append(parts, "name=ilike.*"+url.QueryEscape(opts.NameSubstr)+"*")
 	}
-	return filtered, nil
+	if opts.MinPrice != nil {
+		parts = append(parts, "price=gte."+strconv.FormatFloat(*opts.MinPrice, 'f', -1, 64))
+	}
+	if opts.MaxPrice != nil {
+		parts = append(parts, "price=lte."+strconv.FormatFloat(*opts.MaxPrice, 'f', -1, 64))
+	}
+	if opts.Limit > 0 {
+		parts = append(parts, "limit="+strconv.Itoa(opts.Limit))
+	}
+	return strings.Join(parts, "&")
 }

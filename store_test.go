@@ -169,3 +169,34 @@ func TestNewStoreValidation(t *testing.T) {
 		t.Error("expected error for empty apiKey")
 	}
 }
+
+func TestBuildFilterQuery(t *testing.T) {
+	min, max := 100.0, 200.0
+	tests := []struct {
+		name string
+		opts FilterOptions
+		want string
+	}{
+		{"empty", FilterOptions{}, "select=*&order=id"},
+		{"name substring", FilterOptions{NameSubstr: "skirt"}, "select=*&order=id&name=ilike.*skirt*"},
+		{"name with special chars", FilterOptions{NameSubstr: "a&b=c"}, "select=*&order=id&name=ilike.*a%26b%3Dc*"},
+		{"min price", FilterOptions{MinPrice: &min}, "select=*&order=id&price=gte.100"},
+		{"max price", FilterOptions{MaxPrice: &max}, "select=*&order=id&price=lte.200"},
+		{"price range", FilterOptions{MinPrice: &min, MaxPrice: &max}, "select=*&order=id&price=gte.100&price=lte.200"},
+		{"limit only", FilterOptions{Limit: 5}, "select=*&order=id&limit=5"},
+		{
+			"all combined",
+			FilterOptions{NameSubstr: "skirt", MinPrice: &min, MaxPrice: &max, Limit: 2},
+			"select=*&order=id&name=ilike.*skirt*&price=gte.100&price=lte.200&limit=2",
+		},
+		{"limit zero ignored", FilterOptions{Limit: 0}, "select=*&order=id"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildFilterQuery(tt.opts)
+			if got != tt.want {
+				t.Errorf("buildFilterQuery = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
