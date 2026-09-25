@@ -70,13 +70,12 @@ func GetProductHandler(store *Store, imageBase string) echo.HandlerFunc {
 func FilterProductsHandler(store *Store, imageBase string) echo.HandlerFunc {
 	return func(c *echo.Context) error {
 		opts := FilterOptions{}
-		err := c.Bind(&opts)
-		if err != nil {
-			return c.String(http.StatusBadRequest, err.Error())
+		if err := c.Bind(&opts); err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 		}
 		products, err := store.FilterProducts(c.Request().Context(), opts)
 		if err != nil {
-			return c.String(http.StatusInternalServerError, "no product was found")
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		}
 
 		output := make([]ProductWithImageURL, 0, len(products))
