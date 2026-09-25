@@ -1,8 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
-	"sort"
+	"fmt"
+	"os"
+	"sync"
 )
 
 // Prediction is one next-call prediction.
@@ -30,79 +33,104 @@ type tokenizerFile struct {
 	UNKToken   string         `json:"unk_token"`
 }
 
-// LoadTokenizer reads tokenizer.json from disk.
+// LoadTokenizer reads tokenizer.json from disk and returns a usable Tokenizer.
+// Inputs: path — path to tokenizer.json. Output: *Tokenizer, error.
 func LoadTokenizer(path string) (*Tokenizer, error) {
-	// TODO:
-	//   1. os.ReadFile(path)
-	//   2. json.Unmarshal into tokenizerFile
-	//   3. wrap in *Tokenizer and return
-	return nil, errors.New("not implemented")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read tokenizer: %w", err)
+	}
+	var f tokenizerFile
+	if err := json.Unmarshal(data, &f); err != nil {
+		return nil, fmt.Errorf("parse tokenizer: %w", err)
+	}
+	if f.MaxLen <= 0 {
+		return nil, errors.New("tokenizer: max_len must be > 0")
+	}
+	return &Tokenizer{
+		MaxLen:     f.MaxLen,
+		VocabSize:  f.VocabSize,
+		StringToID: f.StringToID,
+		IDToString: f.IDToString,
+	}, nil
 }
 
 // Encode converts a slice of API call strings into a padded int slice of
-// length MaxLen, right-aligned (oldest at the end if truncated).
-// Unknown strings become 0 (the END/PAD token's id).
+// length MaxLen, right-aligned (oldest at the end if truncated). Unknown
+// strings become 0 (the PAD token id).
+// Inputs: history — past call strings, oldest first. Output: []int of length MaxLen.
 func (t *Tokenizer) Encode(history []string) []int {
-	// TODO:
-	//   1. if len(history) > MaxLen, take the LAST MaxLen entries
-	//   2. allocate [MaxLen]int filled with 0 (pad value)
-	//   3. for i, call := range windowed history:
-	//        ids[MaxLen - len(window) + i] = t.StringToID[call] (or 0 if missing)
-	out := make([]int, t.MaxLen)
-	_ = out
-	return out
+	if len(history) > t.MaxLen {
+		history = history[len(history)-t.MaxLen:]
+	}
+	ids := make([]int, t.MaxLen)
+	for i, call := range history {
+		id, ok := t.StringToID[call]
+		if !ok {
+			id = 0
+		}
+		ids[t.MaxLen-len(history)+i] = id
+	}
+	return ids
 }
 
-// Predictor wraps the loaded ONNX model and tokenizer.
-// It is safe for concurrent use (onnxruntime_go sessions are thread-safe).
+// predictorBackend is the implementation interface selected at build time:
+// the ONNX-backed implementation lives in predictor_onnx.go (build tag cgo),
+// the stub lives in predictor_stub.go (build tag !cgo).
+type predictorBackend interface {
+	Predict(history []string, topK int) ([]Prediction, error)
+	Close() error
+}
+
+// Predictor wraps the loaded ONNX model and tokenizer. Safe for concurrent use.
 type Predictor struct {
-	tokenizer  *Tokenizer
-	inputName  string
-	outputName string
-	inputShape []int64
+	mu        sync.Mutex
+	closed    bool
+	backend   predictorBackend
+	tokenizer *Tokenizer
 }
 
-// NewPredictor loads the .onnx file and tokenizer from disk.
-// Call this ONCE at startup — loading is expensive (~100-200ms).
+// NewPredictor loads the .onnx file and tokenizer from disk and returns a
+// ready-to-use *Predictor. Call this ONCE at startup. The actual ONNX
+// session creation requires CGO; on non-CGO builds a stub backend is used.
 func NewPredictor(onnxPath, tokenizerPath string) (*Predictor, error) {
-	// TODO:
-	//   1. tok, err := LoadTokenizer(tokenizerPath)
-	//   2. sess, err := ort.NewDynamicAdvancedSession(
-	//         onnxPath,
-	//         []string{"input_layer"},
-	//         []string{"output_0"},
-	//      )
-	//   3. return &Predictor{ session: sess, tokenizer: tok,
-	//         inputName: "input_layer", outputName: "output_0",
-	//         inputShape: []int64{1, int64(tok.MaxLen)} }
-	return nil, errors.New("not implemented")
+	tok, err := LoadTokenizer(tokenizerPath)
+	if err != nil {
+		return nil, err
+	}
+	be, err := newBackend(onnxPath, tok)
+	if err != nil {
+		return nil, err
+	}
+	return &Predictor{backend: be, tokenizer: tok}, nil
 }
 
 // Predict runs the model on the given history and returns top-K predictions
-// sorted by probability (highest first).
-//   history: past calls, oldest first (we keep only the last MaxLen)
-//   topK:    number of predictions to return (typically 3)
+// sorted by probability (highest first). Inputs: history — past calls, oldest
+// first (only last MaxLen used); topK — number of predictions to return.
+// Output: []Prediction, error.
 func (p *Predictor) Predict(history []string, topK int) ([]Prediction, error) {
-	// TODO:
-	//   1. ids := p.tokenizer.Encode(history)
-	//   2. convert []int -> []float32 (ONNX expects float32, not int32)
-	//   3. wrap in [][]float32 of size [1][MaxLen]
-	//   4. inputTensor, _ := ort.NewTensor(p.inputShape, flatData)
-	//   5. outputs, _ := p.session.Run([]ort.Value{inputTensor})
-	//   6. extract output[0] as []float32 of length VocabSize
-	//   7. arg-sort topK indices, look each up in tokenizer.IDToString,
-	//      build []Prediction sorted by Prob desc
-	//
-	//   Tip for step 7:
-	//     idxs := make([]int, VocabSize); for i := range idxs { idxs[i] = i }
-	//     sort.Slice(idxs, func(i, j int) bool { return probs[idxs[i]] > probs[idxs[j]] })
-	//     top := idxs[:topK]
-	_ = sort.Slice
-	return nil, errors.New("not implemented")
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return nil, errors.New("predictor: closed")
+	}
+	if p.backend == nil {
+		return nil, errors.New("predictor: not initialized")
+	}
+	return p.backend.Predict(history, topK)
 }
 
-// Close releases ONNX runtime resources. Call on shutdown.
+// Close releases backend resources. Safe to call multiple times.
 func (p *Predictor) Close() error {
-	// TODO: p.session.Destroy()
-	return nil
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return nil
+	}
+	p.closed = true
+	if p.backend == nil {
+		return nil
+	}
+	return p.backend.Close()
 }
