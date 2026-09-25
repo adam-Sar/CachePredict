@@ -38,7 +38,7 @@ func TestLoadConfig(t *testing.T) {
 	if cfg.CacheMaxEntries != 500 {
 		t.Errorf("CacheMaxEntries = %d", cfg.CacheMaxEntries)
 	}
-	if cfg.Port != "1234" {
+	if cfg.Port != ":1234" {
 		t.Errorf("Port = %q", cfg.Port)
 	}
 }

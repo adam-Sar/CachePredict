@@ -4,11 +4,12 @@ import (
 	"log"
 
 	"github.com/dgraph-io/ristretto"
+	"github.com/joho/godotenv"
 	"github.com/labstack/echo/v5"
 )
 
 func main() {
-
+	_ = godotenv.Load() // .env is optional; real env wins if set
 
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -36,5 +37,7 @@ func main() {
 	e.GET("/products/filter",  FilterProductsPageHandler(store))
 	e.POST("/products/filter", FilterProductsHandler(store, cfg.ImageBaseURL))
 	e.GET("/healthz",HealthHandler)
-	e.Start(cfg.Port)
+	if err := e.Start(cfg.Port); err != nil {
+		log.Fatal(err)
+	}
 }
