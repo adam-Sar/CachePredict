@@ -1,6 +1,7 @@
 package main
 
 import (
+	"container/list"
 	"crypto/rand"
 	"encoding/hex"
 	"sync"
@@ -12,42 +13,76 @@ type Session struct {
 	History []string
 }
 
+// SessionStore is an LRU-bounded map of session IDs to Session. When the
+// store exceeds maxSessions entries, the least-recently-used session is
+// evicted on the next touch. Both bounds are required: maxHist caps the
+// per-session history length, maxSessions caps the total session count.
 type SessionStore struct {
-	mu       sync.RWMutex
-	sessions map[string]*Session
-	maxHist  int
+	mu          sync.Mutex
+	sessions    map[string]*Session
+	entries     map[string]*list.Element
+	order       *list.List
+	maxHist     int
+	maxSessions int
 }
 
-func NewSessionStore(maxHist int) *SessionStore {
+type sessionEntry struct {
+	id      string
+	session *Session
+}
+
+// NewSessionStore returns a store with the given per-session history limit
+// and a hard cap on the number of sessions retained at once. maxSessions <=
+// 0 falls back to a sensible default (10000).
+func NewSessionStore(maxHist, maxSessions int) *SessionStore {
+	if maxSessions <= 0 {
+		maxSessions = 10000
+	}
 	return &SessionStore{
-		sessions: make(map[string]*Session),
-		maxHist:  maxHist,
+		sessions:    make(map[string]*Session),
+		entries:     make(map[string]*list.Element),
+		order:       list.New(),
+		maxHist:     maxHist,
+		maxSessions: maxSessions,
 	}
 }
 
+// GetOrCreate returns the session for id, creating it (and touching it as
+// most-recently-used) if it doesn't exist yet.
 func (s *SessionStore) GetOrCreate(id string) *Session {
-	s.mu.RLock()
-	sess, ok := s.sessions[id]
-	s.mu.RUnlock()
-	if ok {
-		return sess
-	}
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if sess, ok := s.sessions[id]; ok {
-		return sess
+	return s.touchLocked(id)
+}
+
+// touchLocked must be called with s.mu held.
+func (s *SessionStore) touchLocked(id string) *Session {
+	if elem, ok := s.entries[id]; ok {
+		s.order.MoveToFront(elem)
+		return elem.Value.(*sessionEntry).session
 	}
-	sess = &Session{
-		ID:      id,
-		History: make([]string, 0, s.maxHist),
-	}
+	sess := &Session{ID: id, History: make([]string, 0, s.maxHist)}
+	elem := s.order.PushFront(&sessionEntry{id: id, session: sess})
+	s.entries[id] = elem
 	s.sessions[id] = sess
+	if s.order.Len() > s.maxSessions {
+		oldest := s.order.Back()
+		if oldest != nil {
+			ent := oldest.Value.(*sessionEntry)
+			s.order.Remove(oldest)
+			delete(s.entries, ent.id)
+			delete(s.sessions, ent.id)
+		}
+	}
 	return sess
 }
 
+// AddCall appends call to the session's history, trimming to maxHist and
+// marking the session as most-recently-used.
 func (s *SessionStore) AddCall(id, call string) {
-	sess := s.GetOrCreate(id)
+	s.mu.Lock()
+	sess := s.touchLocked(id)
+	s.mu.Unlock()
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
 	sess.History = append(sess.History, call)
@@ -56,13 +91,18 @@ func (s *SessionStore) AddCall(id, call string) {
 	}
 }
 
+// Snapshot returns a copy of the session history, or nil if the session is
+// unknown. The session is marked as most-recently-used by the lookup.
 func (s *SessionStore) Snapshot(id string) []string {
-	s.mu.RLock()
-	sess, ok := s.sessions[id]
-	s.mu.RUnlock()
+	s.mu.Lock()
+	elem, ok := s.entries[id]
 	if !ok {
+		s.mu.Unlock()
 		return nil
 	}
+	s.order.MoveToFront(elem)
+	sess := elem.Value.(*sessionEntry).session
+	s.mu.Unlock()
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
 	out := make([]string, len(sess.History))
@@ -70,9 +110,10 @@ func (s *SessionStore) Snapshot(id string) []string {
 	return out
 }
 
+// Count returns the number of sessions currently retained.
 func (s *SessionStore) Count() int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return len(s.sessions)
 }
 

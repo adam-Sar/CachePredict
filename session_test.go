@@ -6,7 +6,7 @@ import (
 )
 
 func TestSessionStoreAddCall(t *testing.T) {
-	store := NewSessionStore(8)
+	store := NewSessionStore(8, 0)
 
 	store.AddCall("alice", "GET /products")
 	store.AddCall("alice", "GET /products?id=44")
@@ -25,7 +25,7 @@ func TestSessionStoreAddCall(t *testing.T) {
 }
 
 func TestSessionStoreTrimMaxHist(t *testing.T) {
-	store := NewSessionStore(3)
+	store := NewSessionStore(3, 0)
 
 	for i := 0; i < 7; i++ {
 		store.AddCall("bob", "call-"+string(rune('a'+i)))
@@ -41,7 +41,7 @@ func TestSessionStoreTrimMaxHist(t *testing.T) {
 }
 
 func TestSessionStoreGetOrCreateReuse(t *testing.T) {
-	store := NewSessionStore(8)
+	store := NewSessionStore(8, 0)
 
 	a := store.GetOrCreate("alice")
 	a.History = append(a.History, "manual push")
@@ -56,7 +56,7 @@ func TestSessionStoreGetOrCreateReuse(t *testing.T) {
 }
 
 func TestSessionStoreIsolation(t *testing.T) {
-	store := NewSessionStore(8)
+	store := NewSessionStore(8, 0)
 
 	store.AddCall("alice", "A1")
 	store.AddCall("bob", "B1")
@@ -77,14 +77,14 @@ func TestSessionStoreIsolation(t *testing.T) {
 }
 
 func TestSessionStoreSnapshotMissing(t *testing.T) {
-	store := NewSessionStore(8)
+	store := NewSessionStore(8, 0)
 	if got := store.Snapshot("nobody"); got != nil {
 		t.Errorf("Snapshot of missing id = %v, want nil", got)
 	}
 }
 
 func TestSessionStoreConcurrent(t *testing.T) {
-	store := NewSessionStore(100)
+	store := NewSessionStore(100, 0)
 	const goroutines = 50
 	const callsEach = 20
 
@@ -105,6 +105,49 @@ func TestSessionStoreConcurrent(t *testing.T) {
 	}
 }
 
+func TestSessionStoreLRUEviction(t *testing.T) {
+	store := NewSessionStore(8, 2)
+
+	store.AddCall("a", "A1")
+	store.AddCall("b", "B1")
+	store.AddCall("c", "C1") // should evict "a"
+
+	if store.Count() != 2 {
+		t.Errorf("Count = %d, want 2", store.Count())
+	}
+	if store.Snapshot("a") != nil {
+		t.Error("expected 'a' to be evicted")
+	}
+	if store.Snapshot("b")[0] != "B1" {
+		t.Error("expected 'b' to survive")
+	}
+	if store.Snapshot("c")[0] != "C1" {
+		t.Error("expected 'c' to survive")
+	}
+}
+
+func TestSessionStoreLRUTouchRefreshesOrder(t *testing.T) {
+	store := NewSessionStore(8, 2)
+
+	store.AddCall("a", "A1")
+	store.AddCall("b", "B1")
+
+	// Touch 'a' so 'b' is now the LRU.
+	store.Snapshot("a")
+
+	store.AddCall("c", "C1") // should evict 'b', not 'a'
+
+	if store.Snapshot("a") == nil {
+		t.Error("'a' should survive after being touched")
+	}
+	if store.Snapshot("b") != nil {
+		t.Error("'b' should have been evicted as LRU")
+	}
+	if store.Snapshot("c") == nil {
+		t.Error("'c' should survive")
+	}
+}
+
 func TestNewSessionID(t *testing.T) {
 	seen := make(map[string]bool, 1000)
 	for i := 0; i < 1000; i++ {
@@ -120,7 +163,7 @@ func TestNewSessionID(t *testing.T) {
 }
 
 func TestSnapshotIsCopy(t *testing.T) {
-	store := NewSessionStore(8)
+	store := NewSessionStore(8, 0)
 	store.AddCall("alice", "A")
 
 	snap := store.Snapshot("alice")

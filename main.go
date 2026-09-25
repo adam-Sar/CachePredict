@@ -35,7 +35,7 @@ func main() {
 	})
 	if err != nil { log.Fatal(err) }
 	defer cache.Close()
-	sessions := NewSessionStore(8)
+	sessions := NewSessionStore(8, 10000)
 
 	registry := NewPrefetchRegistry()
 	registry.Register("GET", "/products", func(ctx context.Context, query string) ([]byte, error) {
