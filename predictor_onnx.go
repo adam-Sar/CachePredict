@@ -17,12 +17,12 @@ import (
 // preferredDLLPath, when set, is added to the Windows DLL search order before
 // InitializeEnvironment() runs. The System32 onnxruntime.dll is older than
 // what onnxruntime_go v1.36.0 expects (API 29), so we have to point at a
-// newer copy ourselves.
+// newer copy ourselves. Resolution order:
+//  1. ONNXRUNTIME_DLL env var (full path to the dll).
+//  2. ./onnxruntime.dll next to the working directory.
 var preferredDLLPath string
 
 func init() {
-	// Try env var first, then walk up from the working directory looking for
-	// a local onnxruntime.dll, then fall back to the cached MinGW bin folder.
 	if v := os.Getenv("ONNXRUNTIME_DLL"); v != "" {
 		preferredDLLPath = v
 	} else if wd, err := os.Getwd(); err == nil {
@@ -32,12 +32,13 @@ func init() {
 		}
 	}
 	if preferredDLLPath == "" {
-		preferredDLLPath = `C:\Users\adams\Downloads\mingw\mingw64\bin\onnxruntime.dll`
+		fmt.Fprintln(os.Stderr, "warning: onnxruntime.dll not found; set ONNXRUNTIME_DLL or place onnxruntime.dll next to the working directory. Falling back to system DLL search order.")
+		return
 	}
-	if dir := filepath.Dir(preferredDLLPath); dir != "" {
-		// SetDllDirectory adds this dir to the DLL search path *before* System32,
-		// so the newer onnxruntime.dll wins over the older one in System32.
-		_ = windows.SetDllDirectory(dir)
+	// SetDllDirectory adds this dir to the DLL search path *before* System32,
+	// so the newer onnxruntime.dll wins over the older one in System32.
+	if err := windows.SetDllDirectory(filepath.Dir(preferredDLLPath)); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: SetDllDirectory(%q): %v\n", filepath.Dir(preferredDLLPath), err)
 	}
 }
 
