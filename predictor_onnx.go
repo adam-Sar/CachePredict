@@ -3,91 +3,135 @@
 package main
 
 import (
-"errors"
-"fmt"
-"sort"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"sync"
 
-ort "github.com/yalue/onnxruntime_go"
+	ort "github.com/yalue/onnxruntime_go"
+	"golang.org/x/sys/windows"
 )
 
-// onnxBackend runs inference against a real ONNX model via the
-// onnxruntime_go library. Requires CGO and a working C toolchain.
-type onnxBackend struct {
-session    *ort.DynamicAdvancedSession
-tokenizer  *Tokenizer
-inputShape []int64
+// preferredDLLPath, when set, is added to the Windows DLL search order before
+// InitializeEnvironment() runs. The System32 onnxruntime.dll is older than
+// what onnxruntime_go v1.36.0 expects (API 29), so we have to point at a
+// newer copy ourselves.
+var preferredDLLPath string
+
+func init() {
+	// Try env var first, then walk up from the working directory looking for
+	// a local onnxruntime.dll, then fall back to the cached MinGW bin folder.
+	if v := os.Getenv("ONNXRUNTIME_DLL"); v != "" {
+		preferredDLLPath = v
+	} else if wd, err := os.Getwd(); err == nil {
+		candidate := filepath.Join(wd, "onnxruntime.dll")
+		if _, err := os.Stat(candidate); err == nil {
+			preferredDLLPath = candidate
+		}
+	}
+	if preferredDLLPath == "" {
+		preferredDLLPath = `C:\Users\adams\Downloads\mingw\mingw64\bin\onnxruntime.dll`
+	}
+	if dir := filepath.Dir(preferredDLLPath); dir != "" {
+		// SetDllDirectory adds this dir to the DLL search path *before* System32,
+		// so the newer onnxruntime.dll wins over the older one in System32.
+		_ = windows.SetDllDirectory(dir)
+	}
 }
+
+type onnxBackend struct {
+	session    *ort.DynamicAdvancedSession
+	tokenizer  *Tokenizer
+	inputShape []int64
+}
+
+var initOnce sync.Once
 
 func newBackend(onnxPath string, tok *Tokenizer) (predictorBackend, error) {
-sess, err := ort.NewDynamicAdvancedSession(
-onnxPath,
-[]string{"input_layer"},
-[]string{"output_0"},
-nil,
-)
-if err != nil {
-return nil, fmt.Errorf("create onnx session: %w", err)
-}
-return &onnxBackend{
-session:    sess,
-tokenizer: tok,
-inputShape: []int64{1, int64(tok.MaxLen)},
-}, nil
+	var initErr error
+	initOnce.Do(func() {
+		initErr = ort.InitializeEnvironment()
+	})
+	if initErr != nil {
+		return nil, fmt.Errorf("initialize onnx runtime: %w", initErr)
+	}
+
+	sess, err := ort.NewDynamicAdvancedSession(
+		onnxPath,
+		[]string{"input_layer"},
+		[]string{"output_0"},
+		nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create onnx session: %w", err)
+	}
+	return &onnxBackend{
+		session:    sess,
+		tokenizer:  tok,
+		inputShape: []int64{1, int64(tok.MaxLen)},
+	}, nil
 }
 
 func (b *onnxBackend) Predict(history []string, topK int) ([]Prediction, error) {
-if b.session == nil {
-return nil, errors.New("onnx backend: session not initialized")
-}
-if topK <= 0 || topK > b.tokenizer.VocabSize {
-topK = b.tokenizer.VocabSize
-}
+	if b.session == nil {
+		return nil, errors.New("onnx backend: session not initialized")
+	}
+	if topK <= 0 || topK > b.tokenizer.VocabSize {
+		topK = b.tokenizer.VocabSize
+	}
 
-ids := b.tokenizer.Encode(history)
-flatData := make([]float32, len(ids))
-for i, id := range ids {
-flatData[i] = float32(id)
-}
+	ids := b.tokenizer.Encode(history)
+	flatData := make([]float32, len(ids))
+	for i, id := range ids {
+		flatData[i] = float32(id)
+	}
 
-inputTensor, err := ort.NewTensor(b.inputShape, flatData)
-if err != nil {
-return nil, fmt.Errorf("create input tensor: %w", err)
-}
-defer inputTensor.Destroy()
+	inputTensor, err := ort.NewTensor(b.inputShape, flatData)
+	if err != nil {
+		return nil, fmt.Errorf("create input tensor: %w", err)
+	}
+	defer inputTensor.Destroy()
 
-outputs := []ort.Value{}
-if err := b.session.Run([]ort.Value{inputTensor}, outputs); err != nil {
-return nil, fmt.Errorf("run session: %w", err)
-}
-defer outputs[0].Destroy()
+	// Pre-allocate the output tensor so the library has somewhere to write.
+	// The shape must match the model's output shape ([1, VocabSize] for a
+	// per-token classifier). We let NewTensor allocate the buffer.
+	outShape := []int64{1, int64(b.tokenizer.VocabSize)}
+	outputTensor, err := ort.NewTensor[float32](outShape, make([]float32, b.tokenizer.VocabSize))
+	if err != nil {
+		return nil, fmt.Errorf("create output tensor: %w", err)
+	}
+	defer outputTensor.Destroy()
 
-outputTensor, ok := outputs[0].(*ort.Tensor[float32])
-if !ok {
-return nil, fmt.Errorf("unexpected output tensor type %T", outputs[0])
-}
-probs := outputTensor.GetData()
+	outputs := []ort.Value{outputTensor}
+	if err := b.session.Run([]ort.Value{inputTensor}, outputs); err != nil {
+		return nil, fmt.Errorf("run session: %w", err)
+	}
 
-idxs := make([]int, b.tokenizer.VocabSize)
-for i := range idxs {
-idxs[i] = i
-}
-sort.Slice(idxs, func(i, j int) bool {
-return probs[idxs[i]] > probs[idxs[j]]
-})
+	probs := outputTensor.GetData()
 
-preds := make([]Prediction, topK)
-for i := 0; i < topK; i++ {
-preds[i] = Prediction{
-Call: b.tokenizer.IDToString[idxs[i]],
-Prob: probs[idxs[i]],
-}
-}
-return preds, nil
+	idxs := make([]int, b.tokenizer.VocabSize)
+	for i := range idxs {
+		idxs[i] = i
+	}
+	sort.Slice(idxs, func(i, j int) bool {
+		return probs[idxs[i]] > probs[idxs[j]]
+	})
+
+	preds := make([]Prediction, topK)
+	for i := 0; i < topK; i++ {
+		preds[i] = Prediction{
+			Call: b.tokenizer.IDToString[idxs[i]],
+			Prob: probs[idxs[i]],
+		}
+	}
+	return preds, nil
 }
 
 func (b *onnxBackend) Close() error {
-if b.session == nil {
-return nil
-}
-return b.session.Destroy()
+	if b.session == nil {
+		return nil
+	}
+	return b.session.Destroy()
 }
