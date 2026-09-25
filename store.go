@@ -44,10 +44,10 @@ func (p Product) WithImageURL(base string) ProductWithImageURL {
 }
 
 type FilterOptions struct {
-	NameSubstr string
-	MinPrice   *float64
-	MaxPrice   *float64
-	Limit      int
+	NameSubstr string   `json:"name_substr"`
+	MinPrice   *float64 `json:"min_price,omitempty"`
+	MaxPrice   *float64 `json:"max_price,omitempty"`
+	Limit      int      `json:"limit,omitempty"`
 }
 
 var ErrProductNotFound = errors.New("product not found")
