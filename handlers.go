@@ -8,14 +8,9 @@ import (
 	"github.com/labstack/echo/v5"
 )
 
-// ListProductsHandler handles GET /products. With an ?id=N query param it
-// returns the single matching product; otherwise it lists all products.
-//
-//	store:     data source.
-//	imageBase: CloudFront base URL prepended to each image_path.
-//
-// Returns {"products": [...], "count": N}, or {"product": {...}}, 400 on bad
-// id, 404 if not found, 500 on store error.
+// ListProductsHandler returns GET /products. With ?id=N it returns a single
+// product wrapped as {"product": {...}} (404 if absent, 400 on bad id);
+// otherwise it returns {"products": [...], "count": N}.
 func ListProductsHandler(store *Store, imageBase string) echo.HandlerFunc {
 	return func(c *echo.Context) error {
 		if idStr := c.QueryParam("id"); idStr != "" {
@@ -50,12 +45,9 @@ func ListProductsHandler(store *Store, imageBase string) echo.HandlerFunc {
 	}
 }
 
-// FilterProductsHandler handles POST /products/filter.
-//
-//	store:     data source.
-//	imageBase: CloudFront base URL prepended to each image_path.
-//
-// Body: {name_substr, min_price?, max_price?, limit?}. Returns {"products": [...], "count": N}, 400 on bad body, 500 on store error.
+// FilterProductsHandler returns POST /products/filter. Body fields:
+// name_substr, min_price?, max_price?, limit?. Responds with
+// {"products": [...], "count": N}; 400 on a bad body, 500 on store error.
 func FilterProductsHandler(store *Store, imageBase string) echo.HandlerFunc {
 	return func(c *echo.Context) error {
 		opts := FilterOptions{}
@@ -75,8 +67,8 @@ func FilterProductsHandler(store *Store, imageBase string) echo.HandlerFunc {
 	}
 }
 
-// FilterProductsPageHandler handles GET /products/filter (metadata, no body).
-// Returns {"filters": {}} placeholder.
+// FilterProductsPageHandler returns GET /products/filter — a placeholder
+// response with the available filter fields. No body is read.
 func FilterProductsPageHandler() echo.HandlerFunc {
 	return func(c *echo.Context) error {
 		return c.JSON(http.StatusOK, map[string]any{"filters": map[string]any{}})

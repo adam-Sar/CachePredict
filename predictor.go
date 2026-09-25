@@ -22,8 +22,7 @@ type Tokenizer struct {
 	IDToString map[int]string
 }
 
-// tokenizerFile is the on-disk JSON shape produced by convert_to_onnx.py.
-// Field tags match tokenizer.json's keys.
+// tokenizerFile mirrors the JSON shape written by convert_to_onnx.py.
 type tokenizerFile struct {
 	MaxLen     int            `json:"max_len"`
 	VocabSize  int            `json:"vocab_size"`
@@ -33,8 +32,8 @@ type tokenizerFile struct {
 	UNKToken   string         `json:"unk_token"`
 }
 
-// LoadTokenizer reads tokenizer.json from disk and returns a usable Tokenizer.
-// Inputs: path — path to tokenizer.json. Output: *Tokenizer, error.
+// LoadTokenizer reads tokenizer.json from disk and returns a populated Tokenizer.
+// Returns an error if the file is missing or its max_len is not positive.
 func LoadTokenizer(path string) (*Tokenizer, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -55,10 +54,8 @@ func LoadTokenizer(path string) (*Tokenizer, error) {
 	}, nil
 }
 
-// Encode converts a slice of API call strings into a padded int slice of
-// length MaxLen, right-aligned (oldest at the end if truncated). Unknown
-// strings become 0 (the PAD token id).
-// Inputs: history — past call strings, oldest first. Output: []int of length MaxLen.
+// Encode converts history into a padded []int of length MaxLen, right-aligned
+// (oldest at the end if truncated). Unknown tokens become 0 (PAD).
 func (t *Tokenizer) Encode(history []string) []int {
 	if len(history) > t.MaxLen {
 		history = history[len(history)-t.MaxLen:]
@@ -83,8 +80,8 @@ type predictorBackend interface {
 }
 
 // Predictor wraps the loaded ONNX model and tokenizer. Safe for concurrent
-// use — the underlying ONNX session is thread-safe, so Predict holds a read
-// lock to allow parallel inference; Close takes the write lock.
+// use: Predict takes an RLock (multiple inferences in parallel); Close takes
+// a write lock.
 type Predictor struct {
 	mu        sync.RWMutex
 	closed    bool
@@ -92,9 +89,9 @@ type Predictor struct {
 	tokenizer *Tokenizer
 }
 
-// NewPredictor loads the .onnx file and tokenizer from disk and returns a
-// ready-to-use *Predictor. Call this ONCE at startup. The actual ONNX
-// session creation requires CGO; on non-CGO builds a stub backend is used.
+// NewPredictor loads the .onnx model and tokenizer and returns a ready-to-use
+// Predictor. Call ONCE at startup. The ONNX backend needs CGO; non-CGO builds
+// fall back to a deterministic stub (see predictor_stub.go).
 func NewPredictor(onnxPath, tokenizerPath string) (*Predictor, error) {
 	tok, err := LoadTokenizer(tokenizerPath)
 	if err != nil {
@@ -107,10 +104,9 @@ func NewPredictor(onnxPath, tokenizerPath string) (*Predictor, error) {
 	return &Predictor{backend: be, tokenizer: tok}, nil
 }
 
-// Predict runs the model on the given history and returns top-K predictions
-// sorted by probability (highest first). Inputs: history — past calls, oldest
-// first (only last MaxLen used); topK — number of predictions to return.
-// Output: []Prediction, error.
+// Predict runs inference on history and returns the top-K predictions sorted
+// by probability (highest first). Only the last MaxLen entries of history are
+// used; older ones are dropped.
 func (p *Predictor) Predict(history []string, topK int) ([]Prediction, error) {
 	p.mu.RLock()
 	if p.closed {

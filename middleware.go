@@ -111,22 +111,13 @@ func splitCall(call string) (method, path, query string, ok bool) {
 }
 
 // PrefetchMiddleware returns an echo middleware that:
-//   - assigns a session id (via cookie) and logs the call to session history;
-//   - serves cached responses for matching keys (skipping predictor on hit);
+//   - assigns a session id (via cookie) and appends the call to session history;
+//   - serves cached responses for matching keys (skipping the predictor on hit);
 //   - on miss, runs the handler with a recording writer and stores the bytes;
 //   - asynchronously warms the cache with the predictor's top-K predictions.
 //
-// Cache values are []byte response bodies; cost is len(body); TTL comes from
-// the ttl argument via cache.SetWithTTL.
-//
-// Inputs:
-//
-// p:         LSTM predictor; pass nil to disable async prefetch.
-// cache:     ristretto cache shared with the rest of the app.
-// registry:  endpoint → byte-producing function used by prefetch.
-// sessions:  per-user history used by the predictor.
-// ttl:       how long a cached response stays valid.
-// cookieSec: whether to set the Secure flag on the session cookie.
+// Pass a nil predictor to disable async prefetch. cookieSecure controls whether
+// the session cookie is marked Secure (set true behind HTTPS).
 func PrefetchMiddleware(
 	p *Predictor,
 	cache *ristretto.Cache,
@@ -137,7 +128,7 @@ func PrefetchMiddleware(
 ) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c *echo.Context) error {
-			// Session: create if absent, log this call.
+			// Per-session history: create + cookie on first hit, then append.
 			sid := sessionIDFromRequest(c)
 			if sid == "" {
 				sid = NewSessionID()
@@ -203,8 +194,8 @@ func PrefetchMiddleware(
 	}
 }
 
-// writeCached replays a cached response (status + content type + body) on the
-// echo context. Inputs: c — echo context; resp — cached entry to replay.
+// writeCached replays a cached response (status, content type, body) on the
+// echo context. Used after a cache hit to bypass the handler.
 func writeCached(c *echo.Context, resp *cachedResponse) error {
 	c.Response().Header().Set("Content-Type", resp.contentType)
 	c.Response().Header().Set("X-Cache", "HIT")
@@ -213,9 +204,9 @@ func writeCached(c *echo.Context, resp *cachedResponse) error {
 	return err
 }
 
-// prefetch runs the predictor for the session and warms the cache for each
-// predicted call that has a registered PrefetchFunc. Unregistered or
-// unparseable predictions are silently skipped.
+// prefetch runs the predictor on the session history and warms the cache for
+// each prediction that has a registered PrefetchFunc. Anything unregistered or
+// unparseable is silently dropped. Runs as a goroutine; errors only log.
 func prefetch(p *Predictor, cache *ristretto.Cache, registry *PrefetchRegistry, sessions *SessionStore, sid string, ttl time.Duration) {
 	history := sessions.Snapshot(sid)
 	preds, err := p.Predict(history, 3)
@@ -255,8 +246,7 @@ func prefetch(p *Predictor, cache *ristretto.Cache, registry *PrefetchRegistry, 
 	}
 }
 
-// sessionIDFromRequest returns the "session_id" cookie value, or "" if missing.
-// Inputs: c — echo context. Output: cookie value or "".
+// sessionIDFromRequest returns the "session_id" cookie value, or "" if absent.
 func sessionIDFromRequest(c *echo.Context) string {
 	cookie, err := c.Cookie("session_id")
 	if err != nil {
@@ -265,9 +255,8 @@ func sessionIDFromRequest(c *echo.Context) string {
 	return cookie.Value
 }
 
-// writeSessionCookie sets the "session_id" cookie on the response.
-// Inputs: c — echo context; id — session id to write; secure — when true,
-// the cookie is only sent over HTTPS.
+// writeSessionCookie sets the "session_id" cookie. When secure is true the
+// cookie is only sent over HTTPS.
 func writeSessionCookie(c *echo.Context, id string, secure bool) {
 	c.SetCookie(&http.Cookie{
 		Name:     "session_id",
