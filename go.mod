@@ -2,9 +2,14 @@ module proj
 
 go 1.26.5
 
-require github.com/labstack/echo/v5 v5.3.1
+require (
+	github.com/dgraph-io/ristretto v0.2.0
+	github.com/labstack/echo/v5 v5.3.1
+)
 
 require (
-	github.com/yalue/onnxruntime_go v1.36.0 // indirect
-	golang.org/x/time v0.15.0 // indirect
+	github.com/cespare/xxhash/v2 v2.1.1 // indirect
+	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/pkg/errors v0.9.1 // indirect
+	golang.org/x/sys v0.11.0 // indirect
 )
