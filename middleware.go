@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/dgraph-io/ristretto"
@@ -22,6 +24,64 @@ func (r *recorder) Write(b []byte) (int, error) {
 	return r.ResponseWriter.Write(b)
 }
 
+// PrefetchFunc produces the bytes that should be cached for an endpoint.
+// Implementations must return the exact bytes the matching handler would
+// emit so the cache stays consistent across prefetch and real requests.
+type PrefetchFunc func(ctx context.Context) ([]byte, error)
+
+// PrefetchRegistry maps "METHOD /path" to a PrefetchFunc. Predicted calls
+// include their query string, but dispatch is method+path only; the query
+// becomes part of the cache key so different predicted inputs still cache
+// separately.
+type PrefetchRegistry struct {
+	funcs map[string]PrefetchFunc
+}
+
+func NewPrefetchRegistry() *PrefetchRegistry {
+	return &PrefetchRegistry{funcs: make(map[string]PrefetchFunc)}
+}
+
+func (r *PrefetchRegistry) Register(method, path string, fn PrefetchFunc) {
+	r.funcs[strings.ToUpper(method)+" "+path] = fn
+}
+
+// Lookup resolves a predicted call string ("METHOD /path?query") to its
+// registered PrefetchFunc and the query string that should be folded into
+// the cache key.
+func (r *PrefetchRegistry) Lookup(call string) (PrefetchFunc, string) {
+	method, path, query, ok := splitCall(call)
+	if !ok {
+		return nil, ""
+	}
+	fn, ok := r.funcs[method+" "+path]
+	if !ok {
+		return nil, ""
+	}
+	return fn, query
+}
+
+// splitCall parses "METHOD /path?query" into its parts. The method is
+// upper-cased so callers can register and look up without worrying about
+// case. ok is false when the call is malformed (missing method or path).
+func splitCall(call string) (method, path, query string, ok bool) {
+	parts := strings.SplitN(call, " ", 2)
+	if len(parts) != 2 {
+		return "", "", "", false
+	}
+	method = strings.ToUpper(parts[0])
+	rest := parts[1]
+	if idx := strings.Index(rest, "?"); idx >= 0 {
+		path = rest[:idx]
+		query = rest[idx+1:]
+	} else {
+		path = rest
+	}
+	if path == "" {
+		return "", "", "", false
+	}
+	return method, path, query, true
+}
+
 // PrefetchMiddleware returns an echo middleware that:
 //   - assigns a session id (via cookie) and logs the call to session history;
 //   - serves cached responses for matching keys (skipping predictor on hit);
@@ -35,11 +95,13 @@ func (r *recorder) Write(b []byte) (int, error) {
 //
 // p:        LSTM predictor; pass nil to disable async prefetch.
 // cache:    ristretto cache shared with the rest of the app.
+// registry: endpoint → byte-producing function used by prefetch.
 // sessions: per-user history used by the predictor.
 // ttl:      how long a cached response stays valid.
 func PrefetchMiddleware(
 	p *Predictor,
 	cache *ristretto.Cache,
+	registry *PrefetchRegistry,
 	sessions *SessionStore,
 	ttl time.Duration,
 ) echo.MiddlewareFunc {
@@ -81,8 +143,8 @@ func PrefetchMiddleware(
 				cache.SetWithTTL(key, rec.buf.Bytes(), int64(rec.buf.Len()), ttl)
 			}
 
-			if p != nil {
-				go prefetch(p, cache, sessions, sid, ttl)
+			if p != nil && registry != nil {
+				go prefetch(p, cache, registry, sessions, sid, ttl)
 			}
 			return nil
 		}
@@ -98,10 +160,10 @@ func writeCached(c *echo.Context, b []byte) error {
 	return err
 }
 
-// prefetch predicts the next likely calls for the given session. Cache warming
-// is a no-op until a handler registry is added to route pred.Call strings to
-// the matching core handler.
-func prefetch(p *Predictor, cache *ristretto.Cache, sessions *SessionStore, sid string, ttl time.Duration) {
+// prefetch runs the predictor for the session and warms the cache for each
+// predicted call that has a registered PrefetchFunc. Unregistered or
+// unparseable predictions are silently skipped.
+func prefetch(p *Predictor, cache *ristretto.Cache, registry *PrefetchRegistry, sessions *SessionStore, sid string, ttl time.Duration) {
 	history := sessions.Snapshot(sid)
 	preds, err := p.Predict(history, 3)
 	if err != nil {
@@ -111,8 +173,20 @@ func prefetch(p *Predictor, cache *ristretto.Cache, sessions *SessionStore, sid 
 		if pred.Call == "" || pred.Call == "END" {
 			continue
 		}
-		_ = cache
-		_ = ttl
+		fn, query := registry.Lookup(pred.Call)
+		if fn == nil {
+			continue
+		}
+		body, err := fn(context.Background())
+		if err != nil || len(body) == 0 {
+			continue
+		}
+		method, path, _, _ := splitCall(pred.Call)
+		key := CacheKey(method, path, query, "")
+		if key == "" {
+			continue
+		}
+		cache.SetWithTTL(key, body, int64(len(body)), ttl)
 	}
 }
 
