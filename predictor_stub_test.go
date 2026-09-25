@@ -3,7 +3,8 @@
 package main
 
 import (
-"testing"
+	"sync"
+	"testing"
 )
 
 // TestNewPredictorStubBackend verifies NewPredictor works with the stub.
@@ -97,11 +98,38 @@ t.Errorf("second Close: %v (want nil on stub)", err)
 
 // TestClosedPredictorPredictReturnsError: Predict after Close returns an error.
 func TestClosedPredictorPredictReturnsError(t *testing.T) {
-dir := t.TempDir()
-path := writeTokenizerFile(t, dir, sampleTokenizer())
-p, _ := NewPredictor("", path)
-p.Close()
-if _, err := p.Predict([]string{"x"}, 1); err == nil {
-t.Error("expected error from Predict after Close")
+	dir := t.TempDir()
+	path := writeTokenizerFile(t, dir, sampleTokenizer())
+	p, _ := NewPredictor("", path)
+	p.Close()
+	if _, err := p.Predict([]string{"x"}, 1); err == nil {
+		t.Error("expected error from Predict after Close")
+	}
 }
+
+// TestPredictConcurrent checks the predictor serializes correctness, not
+// throughput, under concurrent calls.
+func TestPredictConcurrent(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTokenizerFile(t, dir, sampleTokenizer())
+	p, _ := NewPredictor("", path)
+	defer p.Close()
+
+	const goroutines = 20
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			preds, err := p.Predict([]string{"GET /products"}, 3)
+			if err != nil {
+				t.Errorf("Predict: %v", err)
+				return
+			}
+			if len(preds) != 3 {
+				t.Errorf("got %d preds, want 3", len(preds))
+			}
+		}()
+	}
+	wg.Wait()
 }

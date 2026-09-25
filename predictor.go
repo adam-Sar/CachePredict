@@ -82,9 +82,11 @@ type predictorBackend interface {
 	Close() error
 }
 
-// Predictor wraps the loaded ONNX model and tokenizer. Safe for concurrent use.
+// Predictor wraps the loaded ONNX model and tokenizer. Safe for concurrent
+// use — the underlying ONNX session is thread-safe, so Predict holds a read
+// lock to allow parallel inference; Close takes the write lock.
 type Predictor struct {
-	mu        sync.Mutex
+	mu        sync.RWMutex
 	closed    bool
 	backend   predictorBackend
 	tokenizer *Tokenizer
@@ -110,15 +112,18 @@ func NewPredictor(onnxPath, tokenizerPath string) (*Predictor, error) {
 // first (only last MaxLen used); topK — number of predictions to return.
 // Output: []Prediction, error.
 func (p *Predictor) Predict(history []string, topK int) ([]Prediction, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.mu.RLock()
 	if p.closed {
+		p.mu.RUnlock()
 		return nil, errors.New("predictor: closed")
 	}
 	if p.backend == nil {
+		p.mu.RUnlock()
 		return nil, errors.New("predictor: not initialized")
 	}
-	return p.backend.Predict(history, topK)
+	backend := p.backend
+	p.mu.RUnlock()
+	return backend.Predict(history, topK)
 }
 
 // Close releases backend resources. Safe to call multiple times.
