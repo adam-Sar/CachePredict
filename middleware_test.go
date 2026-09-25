@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -110,4 +113,54 @@ func TestPrefetchRegistryLookup(t *testing.T) {
 			t.Errorf("expected boom error, got %v", err)
 		}
 	})
+}
+
+func TestRecorderCapturesStatusAndBody(t *testing.T) {
+	tests := []struct {
+		name           string
+		status         int
+		explicitHeader bool
+		contentType    string
+		body           string
+		wantStatus     int
+		wantCT         string
+		wantBody       string
+	}{
+		{
+			name:        "explicit 404",
+			status:      http.StatusNotFound,
+			body:        `{"error":"missing"}`,
+			contentType: "application/json",
+			wantStatus:  http.StatusNotFound,
+			wantCT:      "application/json",
+			wantBody:    `{"error":"missing"}`,
+		},
+		{
+			name:        "implicit 200",
+			body:        `{"ok":true}`,
+			wantStatus:  http.StatusOK,
+			wantCT:      "application/json",
+			wantBody:    `{"ok":true}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			r := &recorder{ResponseWriter: rec, buf: &bytes.Buffer{}}
+			if tt.status != 0 {
+				r.WriteHeader(tt.status)
+			}
+			if tt.contentType != "" {
+				r.Header().Set("Content-Type", tt.contentType)
+			}
+			r.Write([]byte(tt.body))
+
+			if r.status != tt.wantStatus {
+				t.Errorf("status = %d, want %d", r.status, tt.wantStatus)
+			}
+			if r.buf.String() != tt.wantBody {
+				t.Errorf("body = %q, want %q", r.buf.String(), tt.wantBody)
+			}
+		})
+	}
 }

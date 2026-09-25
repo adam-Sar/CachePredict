@@ -13,15 +13,40 @@ import (
 )
 
 // recorder tees response writes into a buffer for capture while forwarding
-// headers and WriteHeader to the underlying writer.
+// headers and WriteHeader to the underlying writer. It captures the status
+// code and content type so cached entries can be replayed faithfully.
 type recorder struct {
 	http.ResponseWriter
-	buf *bytes.Buffer
+	buf         *bytes.Buffer
+	status      int
+	wroteHeader bool
+}
+
+func (r *recorder) WriteHeader(s int) {
+	if !r.wroteHeader {
+		r.status = s
+		r.wroteHeader = true
+	}
+	r.ResponseWriter.WriteHeader(s)
 }
 
 func (r *recorder) Write(b []byte) (int, error) {
+	if !r.wroteHeader {
+		// net/http auto-writes 200 before the first Write; mirror that.
+		r.status = http.StatusOK
+		r.wroteHeader = true
+	}
 	r.buf.Write(b)
 	return r.ResponseWriter.Write(b)
+}
+
+// cachedResponse is what the ristretto cache stores. Status and content type
+// must be replayed alongside the body so e.g. a 404 stays a 404 after the
+// underlying handler is bypassed.
+type cachedResponse struct {
+	status      int
+	contentType string
+	body        []byte
 }
 
 // PrefetchFunc produces the bytes that should be cached for an endpoint.
@@ -129,8 +154,8 @@ func PrefetchMiddleware(
 			}
 
 			if v, found := cache.Get(key); found {
-				if b, ok := v.([]byte); ok {
-					return writeCached(c, b)
+				if resp, ok := v.(*cachedResponse); ok {
+					return writeCached(c, resp)
 				}
 			}
 
@@ -139,8 +164,21 @@ func PrefetchMiddleware(
 			if err := next(c); err != nil {
 				return err
 			}
-			if rec.buf.Len() > 0 {
-				cache.SetWithTTL(key, rec.buf.Bytes(), int64(rec.buf.Len()), ttl)
+			if rec.wroteHeader {
+				contentType := rec.Header().Get("Content-Type")
+				if contentType == "" {
+					contentType = "application/json"
+				}
+				status := rec.status
+				if status == 0 {
+					status = http.StatusOK
+				}
+				resp := &cachedResponse{
+					status:      status,
+					contentType: contentType,
+					body:        rec.buf.Bytes(),
+				}
+				cache.SetWithTTL(key, resp, int64(len(resp.body)), ttl)
 			}
 
 			if p != nil && registry != nil {
@@ -151,12 +189,12 @@ func PrefetchMiddleware(
 	}
 }
 
-// writeCached writes pre-cached bytes back as a 200 application/json response.
-// Inputs: c — echo context; b — cached body.
-func writeCached(c *echo.Context, b []byte) error {
-	c.Response().Header().Set("Content-Type", "application/json")
-	c.Response().WriteHeader(http.StatusOK)
-	_, err := c.Response().Write(b)
+// writeCached replays a cached response (status + content type + body) on the
+// echo context. Inputs: c — echo context; resp — cached entry to replay.
+func writeCached(c *echo.Context, resp *cachedResponse) error {
+	c.Response().Header().Set("Content-Type", resp.contentType)
+	c.Response().WriteHeader(resp.status)
+	_, err := c.Response().Write(resp.body)
 	return err
 }
 
@@ -186,7 +224,12 @@ func prefetch(p *Predictor, cache *ristretto.Cache, registry *PrefetchRegistry, 
 		if key == "" {
 			continue
 		}
-		cache.SetWithTTL(key, body, int64(len(body)), ttl)
+		resp := &cachedResponse{
+			status:      http.StatusOK,
+			contentType: "application/json",
+			body:        body,
+		}
+		cache.SetWithTTL(key, resp, int64(len(body)), ttl)
 	}
 }
 
