@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -16,6 +17,10 @@ type Config struct {
 	CacheTTL        time.Duration
 	CacheMaxEntries int
 	Port            string
+	SessionMaxHist  int
+	SessionMaxCount int
+	CookieSecure    bool
+	ShutdownTimeout time.Duration
 }
 
 func LoadConfig() (*Config, error) {
@@ -28,6 +33,10 @@ func LoadConfig() (*Config, error) {
 		CacheTTL:        parseCacheTTL(getenv("CACHE_TTL", "60s")),
 		CacheMaxEntries: parseInt(getenv("CACHE_MAX", "500"), 500),
 		Port:            getenv("PORT", ":1234"),
+		SessionMaxHist:  parseInt(getenv("SESSION_MAX_HIST", "8"), 8),
+		SessionMaxCount: parseInt(getenv("SESSION_MAX_COUNT", "10000"), 10000),
+		CookieSecure:    parseBool(getenv("COOKIE_SECURE", "false")),
+		ShutdownTimeout: parseCacheTTL(getenv("SHUTDOWN_TIMEOUT", "10s")),
 	}
 	if cfg.SupabaseURL == "" {
 		return nil, errors.New("SUPABASE_URL is required")
@@ -63,4 +72,12 @@ func parseInt(s string, fallback int) int {
 		return n
 	}
 	return fallback
+}
+
+func parseBool(s string) bool {
+	switch strings.ToLower(s) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }

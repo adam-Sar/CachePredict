@@ -120,17 +120,19 @@ func splitCall(call string) (method, path, query string, ok bool) {
 //
 // Inputs:
 //
-// p:        LSTM predictor; pass nil to disable async prefetch.
-// cache:    ristretto cache shared with the rest of the app.
-// registry: endpoint → byte-producing function used by prefetch.
-// sessions: per-user history used by the predictor.
-// ttl:      how long a cached response stays valid.
+// p:         LSTM predictor; pass nil to disable async prefetch.
+// cache:     ristretto cache shared with the rest of the app.
+// registry:  endpoint → byte-producing function used by prefetch.
+// sessions:  per-user history used by the predictor.
+// ttl:       how long a cached response stays valid.
+// cookieSec: whether to set the Secure flag on the session cookie.
 func PrefetchMiddleware(
 	p *Predictor,
 	cache *ristretto.Cache,
 	registry *PrefetchRegistry,
 	sessions *SessionStore,
 	ttl time.Duration,
+	cookieSecure bool,
 ) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c *echo.Context) error {
@@ -138,7 +140,7 @@ func PrefetchMiddleware(
 			sid := sessionIDFromRequest(c)
 			if sid == "" {
 				sid = NewSessionID()
-				writeSessionCookie(c, sid)
+				writeSessionCookie(c, sid, cookieSecure)
 			}
 			sessions.AddCall(sid, c.Request().Method+" "+c.Request().URL.Path)
 
@@ -246,13 +248,16 @@ func sessionIDFromRequest(c *echo.Context) string {
 }
 
 // writeSessionCookie sets the "session_id" cookie on the response.
-// Inputs: c — echo context; id — session id to write.
-func writeSessionCookie(c *echo.Context, id string) {
+// Inputs: c — echo context; id — session id to write; secure — when true,
+// the cookie is only sent over HTTPS.
+func writeSessionCookie(c *echo.Context, id string, secure bool) {
 	c.SetCookie(&http.Cookie{
 		Name:     "session_id",
 		Value:    id,
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
 		MaxAge:   86400,
 	})
 }
