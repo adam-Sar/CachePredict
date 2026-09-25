@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -159,9 +160,11 @@ func PrefetchMiddleware(
 			if key == "" {
 				return next(c) // unparseable query — skip caching, still serve
 			}
+			log.Printf("[mw] sid=%s %s %s key=%s", sid[:8], c.Request().Method, c.Request().URL.RequestURI(), key[:12])
 
 			if v, found := cache.Get(key); found {
 				if resp, ok := v.(*cachedResponse); ok {
+					log.Printf("[mw] sid=%s HIT key=%s", sid[:8], key[:12])
 					return writeCached(c, resp)
 				}
 			}
@@ -187,6 +190,9 @@ func PrefetchMiddleware(
 					body:        rec.buf.Bytes(),
 				}
 				cache.SetWithTTL(key, resp, int64(len(resp.body)), ttl)
+				log.Printf("[mw] sid=%s MISS→cached key=%s status=%d bytes=%d ttl=%s", sid[:8], key[:12], status, len(resp.body), ttl)
+			} else {
+				log.Printf("[mw] sid=%s MISS no-header key=%s", sid[:8], key[:12])
 			}
 
 			if p != nil && registry != nil {
@@ -214,23 +220,29 @@ func prefetch(p *Predictor, cache *ristretto.Cache, registry *PrefetchRegistry, 
 	history := sessions.Snapshot(sid)
 	preds, err := p.Predict(history, 3)
 	if err != nil {
+		log.Printf("[pre] sid=%s predictor err=%v history=%v", sid[:8], err, history)
 		return
 	}
-	for _, pred := range preds {
+	log.Printf("[pre] sid=%s history=%v predictions=%d", sid[:8], history, len(preds))
+	for i, pred := range preds {
+		log.Printf("[pre] sid=%s  [%d] p=%.4f call=%q", sid[:8], i, pred.Prob, pred.Call)
 		if pred.Call == "" || pred.Call == "END" {
 			continue
 		}
 		fn, query := registry.Lookup(pred.Call)
 		if fn == nil {
+			log.Printf("[pre] sid=%s  [%d] SKIP no-registered-handler for %q", sid[:8], i, pred.Call)
 			continue
 		}
 		body, err := fn(context.Background(), query)
 		if err != nil || len(body) == 0 {
+			log.Printf("[pre] sid=%s  [%d] SKIP fn-err=%v bytes=%d for %q", sid[:8], i, err, len(body), pred.Call)
 			continue
 		}
 		method, path, _, _ := splitCall(pred.Call)
 		key := CacheKey(method, path, query, "")
 		if key == "" {
+			log.Printf("[pre] sid=%s  [%d] SKIP empty-key for %q", sid[:8], i, pred.Call)
 			continue
 		}
 		resp := &cachedResponse{
@@ -239,6 +251,7 @@ func prefetch(p *Predictor, cache *ristretto.Cache, registry *PrefetchRegistry, 
 			body:        body,
 		}
 		cache.SetWithTTL(key, resp, int64(len(body)), ttl)
+		log.Printf("[pre] sid=%s  [%d] STORED key=%s call=%q bytes=%d ttl=%s", sid[:8], i, key[:12], pred.Call, len(body), ttl)
 	}
 }
 
