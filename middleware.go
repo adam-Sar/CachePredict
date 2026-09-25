@@ -164,6 +164,7 @@ func PrefetchMiddleware(
 			}
 
 			rec := &recorder{ResponseWriter: c.Response(), buf: &bytes.Buffer{}}
+			rec.Header().Set("X-Cache", "MISS")
 			c.SetResponse(rec)
 			if err := next(c); err != nil {
 				return err
@@ -197,6 +198,7 @@ func PrefetchMiddleware(
 // echo context. Inputs: c — echo context; resp — cached entry to replay.
 func writeCached(c *echo.Context, resp *cachedResponse) error {
 	c.Response().Header().Set("Content-Type", resp.contentType)
+	c.Response().Header().Set("X-Cache", "HIT")
 	c.Response().WriteHeader(resp.status)
 	_, err := c.Response().Write(resp.body)
 	return err
