@@ -78,6 +78,7 @@ func main() {
 	e.GET("/products/filter", FilterProductsPageHandler())
 	e.POST("/products/filter", FilterProductsHandler(store, cfg.ImageBaseURL))
 	e.GET("/healthz", HealthHandler)
+	e.GET("/api/events", EventsHandler)
 
 	// Run the server in a goroutine so we can intercept shutdown signals
 	// and let in-flight requests drain via Echo's graceful shutdown.

@@ -152,10 +152,25 @@ func PrefetchMiddleware(
 				return next(c) // unparseable query — skip caching, still serve
 			}
 			log.Printf("[mw] sid=%s %s %s key=%s", sid[:8], c.Request().Method, c.Request().URL.RequestURI(), key[:12])
+			publishEvent(Event{
+				Type:   "request",
+				SID:    sid,
+				Method: c.Request().Method,
+				Path:   c.Request().URL.RequestURI(),
+				Key:    key,
+			})
 
 			if v, found := cache.Get(key); found {
 				if resp, ok := v.(*cachedResponse); ok {
 					log.Printf("[mw] sid=%s HIT key=%s", sid[:8], key[:12])
+					publishEvent(Event{
+						Type:        "request",
+						SID:         sid,
+						Method:      c.Request().Method,
+						Path:        c.Request().URL.RequestURI(),
+						Key:         key,
+						CacheStatus: "HIT",
+					})
 					return writeCached(c, resp)
 				}
 			}
@@ -182,8 +197,26 @@ func PrefetchMiddleware(
 				}
 				cache.SetWithTTL(key, resp, int64(len(resp.body)), ttl)
 				log.Printf("[mw] sid=%s MISS→cached key=%s status=%d bytes=%d ttl=%s", sid[:8], key[:12], status, len(resp.body), ttl)
+				publishEvent(Event{
+					Type:        "request",
+					SID:         sid,
+					Method:      c.Request().Method,
+					Path:        c.Request().URL.RequestURI(),
+					Key:         key,
+					CacheStatus: "MISS",
+					Bytes:       len(resp.body),
+					TTLMs:       ttl.Milliseconds(),
+				})
 			} else {
 				log.Printf("[mw] sid=%s MISS no-header key=%s", sid[:8], key[:12])
+				publishEvent(Event{
+					Type:        "request",
+					SID:         sid,
+					Method:      c.Request().Method,
+					Path:        c.Request().URL.RequestURI(),
+					Key:         key,
+					CacheStatus: "MISS",
+				})
 			}
 
 			if p != nil && registry != nil {
@@ -215,25 +248,36 @@ func prefetch(p *Predictor, cache *ristretto.Cache, registry *PrefetchRegistry, 
 		return
 	}
 	log.Printf("[pre] sid=%s history=%v predictions=%d", sid[:8], history, len(preds))
+
+	out := make([]EventPrediction, 0, len(preds))
 	for i, pred := range preds {
 		log.Printf("[pre] sid=%s  [%d] p=%.4f call=%q", sid[:8], i, pred.Prob, pred.Call)
+		ep := EventPrediction{Call: pred.Call, Prob: pred.Prob}
 		if pred.Call == "" || pred.Call == "END" {
+			ep.Reason = "end"
+			out = append(out, ep)
 			continue
 		}
 		fn, query := registry.Lookup(pred.Call)
 		if fn == nil {
 			log.Printf("[pre] sid=%s  [%d] SKIP no-registered-handler for %q", sid[:8], i, pred.Call)
+			ep.Reason = "no-handler"
+			out = append(out, ep)
 			continue
 		}
 		body, err := fn(context.Background(), query)
 		if err != nil || len(body) == 0 {
 			log.Printf("[pre] sid=%s  [%d] SKIP fn-err=%v bytes=%d for %q", sid[:8], i, err, len(body), pred.Call)
+			ep.Reason = "fn-error"
+			out = append(out, ep)
 			continue
 		}
 		method, path, _, _ := splitCall(pred.Call)
 		key := CacheKey(method, path, query, "")
 		if key == "" {
 			log.Printf("[pre] sid=%s  [%d] SKIP empty-key for %q", sid[:8], i, pred.Call)
+			ep.Reason = "empty-key"
+			out = append(out, ep)
 			continue
 		}
 		resp := &cachedResponse{
@@ -243,7 +287,16 @@ func prefetch(p *Predictor, cache *ristretto.Cache, registry *PrefetchRegistry, 
 		}
 		cache.SetWithTTL(key, resp, int64(len(body)), ttl)
 		log.Printf("[pre] sid=%s  [%d] STORED key=%s call=%q bytes=%d ttl=%s", sid[:8], i, key[:12], pred.Call, len(body), ttl)
+		ep.Stored = true
+		ep.Bytes = len(body)
+		out = append(out, ep)
 	}
+	publishEvent(Event{
+		Type:        "prefetch",
+		SID:         sid,
+		History:     history,
+		Predictions: out,
+	})
 }
 
 // sessionIDFromRequest returns the "session_id" cookie value, or "" if absent.
