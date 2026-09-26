@@ -2,45 +2,54 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/labstack/echo/v5"
 )
 
-// Event is a single SSE message published by the middleware. Type drives
-// downstream rendering; SID scopes every event to one caller's session so
-// multiple browser tabs don't see each other's traffic.
+// Event is a single activity message emitted by the middleware. Label and
+// Resource carry human-readable strings for the frontend — the raw method/path
+// are kept for debugging but never rendered to end users.
 type Event struct {
 	Type        string            `json:"type"`
 	SID         string            `json:"sid"`
 	Method      string            `json:"method,omitempty"`
 	Path        string            `json:"path,omitempty"`
+	Query       string            `json:"query,omitempty"`
 	Key         string            `json:"key,omitempty"`
 	CacheStatus string            `json:"cache_status,omitempty"`
 	Bytes       int               `json:"bytes,omitempty"`
 	TTLMs       int64             `json:"ttl_ms,omitempty"`
+	Label       string            `json:"label,omitempty"`
+	Resource    string            `json:"resource,omitempty"`
 	History     []string          `json:"history,omitempty"`
 	Predictions []EventPrediction `json:"predictions,omitempty"`
 }
 
 type EventPrediction struct {
-	Call   string  `json:"call"`
-	Prob   float32 `json:"prob"`
-	Stored bool    `json:"stored"`
-	Reason string  `json:"reason,omitempty"`
-	Bytes  int     `json:"bytes,omitempty"`
+	Call    string  `json:"call"`
+	Prob    float32 `json:"prob"`
+	Stored  bool    `json:"stored"`
+	Reason  string  `json:"reason,omitempty"`
+	Bytes   int     `json:"bytes,omitempty"`
+	Label   string  `json:"label,omitempty"`
+	Resource string  `json:"resource,omitempty"`
 }
+
+const nameCacheMax = 200
 
 var (
 	eventMu   sync.RWMutex
 	eventSubs = map[chan Event]struct{}{}
-	eventLog  []Event // ring-buffered; capped at 200, oldest dropped
+	eventLog  []Event
+	nameMu    sync.RWMutex
+	nameCache = map[int64]string{}
+	nameOrder []int64
 )
-
-const eventLogCap = 200
 
 func SubscribeEvents() chan Event {
 	ch := make(chan Event, 64)
@@ -60,8 +69,8 @@ func UnsubscribeEvents(ch chan Event) {
 func publishEvent(e Event) {
 	eventMu.Lock()
 	eventLog = append(eventLog, e)
-	if len(eventLog) > eventLogCap {
-		eventLog = eventLog[len(eventLog)-eventLogCap:]
+	if len(eventLog) > nameCacheMax*2 {
+		eventLog = eventLog[len(eventLog)-(nameCacheMax*2):]
 	}
 	eventMu.Unlock()
 
@@ -75,21 +84,153 @@ func publishEvent(e Event) {
 	}
 }
 
-// flushWriter sends any buffered bytes to the client. http.NewResponseController
-// (Go 1.20+) handles the Unwrap chain so we don't care how many wrappers echo
-// or the middleware put between us and the socket.
-func flushWriter(w http.ResponseWriter) error {
-	rc := http.NewResponseController(w)
-	if err := rc.Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
-		return err
+// isInternalEvent reports whether an event is infrastructure noise that
+// shouldn't clutter the user-facing activity feed (poll endpoints, health
+// checks). They still hit the Go log via existing log.Printf calls.
+func isInternalEvent(e Event) bool {
+	if e.Type != "request" {
+		return false
 	}
-	return nil
+	if strings.HasPrefix(e.Path, "/api/") {
+		return true
+	}
+	return e.Path == "/healthz"
+}
+
+// rememberName caches a product name keyed by id with FIFO eviction. A name is
+// remembered forever once learned; the only way it leaves the cache is by
+// being bumped out by newer entries.
+func rememberName(id int64, name string) {
+	if name == "" {
+		return
+	}
+	nameMu.Lock()
+	defer nameMu.Unlock()
+	if _, ok := nameCache[id]; ok {
+		return
+	}
+	nameCache[id] = name
+	nameOrder = append(nameOrder, id)
+	if len(nameOrder) > nameCacheMax {
+		evicted := nameOrder[0]
+		nameOrder = nameOrder[1:]
+		delete(nameCache, evicted)
+	}
+}
+
+func lookupName(id int64) string {
+	nameMu.RLock()
+	defer nameMu.RUnlock()
+	return nameCache[id]
+}
+
+// rememberNameFromBody parses a product or product-list JSON body and remembers
+// any product names it contains. Used to enrich both real-request events
+// (response body captured by middleware) and prefetch responses.
+func rememberNameFromBody(body []byte, ids ...int64) {
+	if len(body) == 0 {
+		return
+	}
+	var single struct {
+		Product struct {
+			ID   int64  `json:"id"`
+			Name string `json:"name"`
+		} `json:"product"`
+	}
+	if err := json.Unmarshal(body, &single); err == nil && single.Product.Name != "" {
+		rememberName(single.Product.ID, single.Product.Name)
+	}
+	var list struct {
+		Products []struct {
+			ID   int64  `json:"id"`
+			Name string `json:"name"`
+		} `json:"products"`
+	}
+	if err := json.Unmarshal(body, &list); err == nil {
+		for _, p := range list.Products {
+			rememberName(p.ID, p.Name)
+		}
+	}
+	_ = ids
+}
+
+// extractResourceFromQuery returns a product name for ?id=N queries when one
+// has been learned from a previous response; otherwise the empty string. Used
+// by the middleware so live events show real names as soon as they've been
+// observed once anywhere in this process.
+func extractResourceFromQuery(query string) string {
+	if query == "" {
+		return ""
+	}
+	vals, _ := url.ParseQuery(query)
+	idStr := vals.Get("id")
+	if idStr == "" {
+		return ""
+	}
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		return ""
+	}
+	return lookupName(id)
+}
+
+// humanLabel returns a short verb phrase describing what the call does, with
+// the product name appended when known. Example outputs:
+//
+//	"View product — Leather Bag"
+//	"Filter products (search: leather, max $100)"
+//	"Browse products"
+func humanLabel(method, path, query, body string) string {
+	switch {
+	case path == "/products":
+		if query != "" {
+			vals, _ := url.ParseQuery(query)
+			if idStr := vals.Get("id"); idStr != "" {
+				if id, err := strconv.ParseInt(idStr, 10, 64); err == nil {
+					if name := lookupName(id); name != "" {
+						return "View product — " + name
+					}
+					return fmt.Sprintf("View product #%s", idStr)
+				}
+				return "View product #" + idStr
+			}
+		}
+		return "Browse products"
+	case path == "/products/filter" && method == "POST":
+		var opts struct {
+			NameSubstr string   `json:"name_substr"`
+			MinPrice   *float64 `json:"min_price"`
+			MaxPrice   *float64 `json:"max_price"`
+			Limit      int      `json:"limit"`
+		}
+		_ = json.Unmarshal([]byte(body), &opts)
+		var parts []string
+		if opts.NameSubstr != "" {
+			parts = append(parts, "search: "+opts.NameSubstr)
+		}
+		if opts.MinPrice != nil {
+			parts = append(parts, fmt.Sprintf("min $%.0f", *opts.MinPrice))
+		}
+		if opts.MaxPrice != nil {
+			parts = append(parts, fmt.Sprintf("max $%.0f", *opts.MaxPrice))
+		}
+		if len(parts) == 0 {
+			return "Filter products"
+		}
+		return "Filter products (" + strings.Join(parts, ", ") + ")"
+	case path == "/products/filter":
+		return "Filter page"
+	case path == "/healthz":
+		return "Health check"
+	case strings.HasPrefix(path, "/api/"):
+		return "Internal poll"
+	}
+	return strings.ToUpper(method) + " " + path
 }
 
 // RecentHandler returns the last N events for the caller's session as JSON.
-// The frontend polls this every second; it replaces SSE for the demo because
-// HTTP/1.1 polling works through every proxy without SSE-specific quirks.
-// Returns at most 100 events, newest last.
+// Internal-only events (api/*, healthz) are filtered out so the user-facing
+// feed only shows actions that matter.
 func RecentHandler(c *echo.Context) error {
 	sid := sessionIDFromRequest(c)
 	if sid == "" {
@@ -100,9 +241,13 @@ func RecentHandler(c *echo.Context) error {
 	eventMu.RLock()
 	out := make([]Event, 0, len(eventLog))
 	for _, e := range eventLog {
-		if e.SID == sid {
-			out = append(out, e)
+		if e.SID != sid {
+			continue
 		}
+		if isInternalEvent(e) {
+			continue
+		}
+		out = append(out, e)
 	}
 	eventMu.RUnlock()
 
@@ -110,51 +255,4 @@ func RecentHandler(c *echo.Context) error {
 		out = out[len(out)-100:]
 	}
 	return c.JSON(200, map[string]any{"events": out})
-}
-
-// EventsHandler streams middleware events to the browser as Server-Sent
-// Events. A session_id cookie is created on first hit and used to filter the
-// stream so each caller only sees their own activity.
-func EventsHandler(c *echo.Context) error {
-	h := c.Response().Header()
-	h.Set("Content-Type", "text/event-stream")
-	h.Set("Cache-Control", "no-cache")
-	h.Set("Connection", "keep-alive")
-	h.Set("X-Accel-Buffering", "no")
-
-	sid := sessionIDFromRequest(c)
-	if sid == "" {
-		sid = NewSessionID()
-		writeSessionCookie(c, sid, false)
-	}
-
-	ch := SubscribeEvents()
-	defer UnsubscribeEvents(ch)
-
-	ctx := c.Request().Context()
-	w := c.Response()
-
-	fmt.Fprintf(w, ": connected sid=%s\n\n", sid[:8])
-	if err := flushWriter(w); err != nil {
-		return err
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case e := <-ch:
-			if e.SID != sid {
-				continue
-			}
-			data, err := json.Marshal(e)
-			if err != nil {
-				continue
-			}
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", e.Type, data)
-			if err := flushWriter(w); err != nil {
-				return err
-			}
-		}
-	}
 }

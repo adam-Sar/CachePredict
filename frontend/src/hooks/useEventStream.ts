@@ -35,7 +35,7 @@ export function useEventStream(onPrefetch?: (e: PrefetchEvent) => void): {
 
     async function poll() {
       try {
-        const res = await fetch("/api/recent", { credentials: "include" });
+        const res = await fetch("/api/activity", { credentials: "include" });
         if (!alive) return;
         if (!res.ok) {
           setConnected(false);

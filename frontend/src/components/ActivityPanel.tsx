@@ -1,6 +1,6 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import type { ActivityItem } from "../hooks/useEventStream";
-import { methodPathFromCall, probText, relativeTime, shortKey } from "../lib/format";
+import { probText, relativeTime } from "../lib/format";
 
 interface ActivityPanelProps {
   items: ActivityItem[];
@@ -8,7 +8,7 @@ interface ActivityPanelProps {
 }
 
 export function ActivityPanel({ items, now }: ActivityPanelProps) {
-  const reversed = useMemo(() => [...items].reverse(), [items]);
+  const ordered = useMemo(() => [...items].reverse(), [items]);
   return (
     <aside className="border-l border-rule bg-paper/60 h-full overflow-hidden flex flex-col">
       <div className="px-6 py-5 border-b border-rule">
@@ -19,38 +19,42 @@ export function ActivityPanel({ items, now }: ActivityPanelProps) {
           What the oracle sees
         </h3>
         <p className="text-[12px] text-inkmute mt-2 leading-relaxed">
-          Every request is fed into the LSTM. Predicted next-calls are
-          prefetched into Ristretto so the next click resolves from RAM.
+          Every request feeds the LSTM. Predicted next-calls are prefetched
+          into Ristretto so the next click resolves from RAM.
         </p>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-2 py-2 font-mono text-[12px]">
-        {reversed.length === 0 && (
-          <div className="px-4 py-8 text-taupe text-center text-[12px]">
-            No activity yet. Hit a product card.
+      <div className="flex-1 overflow-y-auto px-4 py-4">
+        {ordered.length === 0 && (
+          <div className="px-3 py-12 text-taupe text-center font-display-italic text-[15px]">
+            No activity yet. Click a product.
           </div>
         )}
-        <ul className="space-y-1">
-          {reversed.map((it) => (
-            <Item key={it.id} item={it} now={now} />
+        <ol className="space-y-3">
+          {ordered.map((it) => (
+            <li key={it.id}>
+              {it.kind === "request" && it.request && <RequestCard req={it.request} ts={it.ts} now={now} />}
+              {it.kind === "prefetch" && it.prefetch && <PrefetchCard ev={it.prefetch} ts={it.ts} now={now} />}
+            </li>
           ))}
-        </ul>
+        </ol>
       </div>
     </aside>
   );
 }
 
-function Item({ item, now }: { item: ActivityItem; now: number }) {
-  if (item.kind === "request" && item.request) {
-    return <RequestRow req={item.request} ts={item.ts} now={now} />;
-  }
-  if (item.kind === "prefetch" && item.prefetch) {
-    return <PrefetchRow ev={item.prefetch} ts={item.ts} now={now} />;
-  }
-  return null;
+function timeOf(ts: number): string {
+  const d = new Date(ts);
+  return (
+    String(d.getHours()).padStart(2, "0") +
+    ":" +
+    String(d.getMinutes()).padStart(2, "0") +
+    ":" +
+    String(d.getSeconds()).padStart(2, "0")
+  );
 }
 
-function RequestRow({
+function RequestCard({
   req,
   ts,
   now,
@@ -60,26 +64,32 @@ function RequestRow({
   now: number;
 }) {
   const isHit = req.cache_status === "HIT";
+  const isMiss = req.cache_status === "MISS";
+  const label = req.label ?? fallbackLabel(req);
   return (
-    <li className="px-3 py-2 border-l-2 border-transparent hover:border-rule hover:bg-paperdim/60 transition-colors">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-ink truncate">
-          <span className="text-taupe mr-1.5">{req.method}</span>
-          <span>{req.path}</span>
-        </span>
-        <span className={`text-[10px] uppercase tracking-[0.14em] whitespace-nowrap ${isHit ? "text-rust" : "text-taupe"}`}>
-          {req.cache_status ?? "—"}
-        </span>
+    <div className="border border-rule bg-paper p-3.5">
+      <div className="flex items-baseline justify-between gap-3">
+        <div className="font-display-roman text-[15px] text-ink leading-snug truncate">
+          {label}
+        </div>
+        <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-taupe whitespace-nowrap shrink-0">
+          {timeOf(ts)}
+        </div>
       </div>
-      <div className="flex items-center justify-between mt-1 text-[10px] text-taupe">
-        <span>key {shortKey(req.key)}</span>
-        <span>{relativeTime(ts, now)}</span>
-      </div>
-    </li>
+      {isHit && (
+        <div className="mt-1.5 font-mono text-[11px] text-rust">⚡ served from cache</div>
+      )}
+      {isMiss && (
+        <div className="mt-1.5 font-mono text-[11px] text-inkmute">
+          ↳ fresh fetch · {req.bytes != null ? `${req.bytes}b` : ""}
+          {req.ttl_ms ? ` · cached for ${Math.round(req.ttl_ms / 1000)}s` : ""}
+        </div>
+      )}
+    </div>
   );
 }
 
-function PrefetchRow({
+function PrefetchCard({
   ev,
   ts,
   now,
@@ -89,45 +99,58 @@ function PrefetchRow({
   now: number;
 }) {
   const stored = ev.predictions.filter((p) => p.stored);
-  const skipped = ev.predictions.filter((p) => !p.stored);
+  const skipped = ev.predictions.filter((p) => !p.stored && p.call !== "END" && p.call !== "");
   return (
-    <li className="px-3 py-2.5 border-l-2 border-rust/40 bg-rust/[0.03] hover:bg-rust/[0.06] transition-colors">
-      <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.14em] text-rust">
-        <span>prefetch → {stored.length} stored</span>
-        <span className="text-taupe normal-case tracking-normal">{relativeTime(ts, now)}</span>
+    <div className="border border-rust/40 bg-paper p-3.5">
+      <div className="flex items-baseline justify-between gap-3">
+        <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-rust">
+          oracle predicts next
+        </div>
+        <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-taupe">
+          {timeOf(ts)}
+        </div>
       </div>
+
       {stored.length > 0 && (
-        <ul className="mt-1.5 space-y-0.5">
-          {stored.map((p, i) => {
-            const { method, path, query } = methodPathFromCall(p.call);
-            return (
-              <li key={i} className="flex items-center justify-between text-ink">
-                <span className="truncate">
-                  <span className="text-taupe mr-1.5">{method}</span>
-                  <span>{path}</span>
-                  {query && <span className="text-taupe">?{query}</span>}
+        <ol className="mt-2.5 space-y-1.5">
+          {stored.slice(0, 5).map((p, i) => (
+            <li key={i} className="flex items-baseline justify-between gap-3 text-[13px]">
+              <span className="flex items-baseline gap-2 min-w-0">
+                <span className="font-mono text-[10px] text-taupe w-4 shrink-0">
+                  {i + 1}.
                 </span>
-                <span className="text-rust text-[10px] ml-2 whitespace-nowrap">{probText(p.prob)}</span>
-              </li>
-            );
-          })}
-        </ul>
+                <span className="font-display-roman text-ink truncate">
+                  {p.resource || p.label || p.call}
+                </span>
+              </span>
+              <span className="flex items-baseline gap-2 shrink-0">
+                <span className="font-mono text-[10px] text-rust">{probText(p.prob)}</span>
+                <span className="font-mono text-[10px] text-taupe">↳ cached</span>
+              </span>
+            </li>
+          ))}
+        </ol>
       )}
+
       {skipped.length > 0 && (
-        <details className="mt-1">
-          <summary className="text-[10px] text-taupe cursor-pointer hover:text-ink list-none">
-            {skipped.length} skipped
+        <details className="mt-2 group">
+          <summary className="font-mono text-[10px] uppercase tracking-[0.14em] text-taupe cursor-pointer hover:text-ink list-none">
+            {skipped.length} skipped (no handler)
           </summary>
-          <ul className="mt-1 space-y-0.5 text-[11px] text-taupe">
+          <ul className="mt-2 space-y-1 text-[12px] text-taupe font-mono">
             {skipped.map((p, i) => (
               <li key={i} className="truncate">
                 {p.call}
-                {p.reason ? <span className="ml-1.5">· {p.reason}</span> : null}
               </li>
             ))}
           </ul>
         </details>
       )}
-    </li>
+    </div>
   );
+}
+
+function fallbackLabel(req: import("../lib/types").RequestEvent): string {
+  if (!req.method || !req.path) return "request";
+  return `${req.method} ${req.path}`;
 }

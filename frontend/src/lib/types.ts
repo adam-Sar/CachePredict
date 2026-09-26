@@ -1,12 +1,13 @@
-export type CacheStatus = "HIT" | "MISS" | undefined;
-
 export interface RequestEvent {
   type: "request";
   sid: string;
-  method: string;
-  path: string;
-  key: string;
-  cache_status?: CacheStatus;
+  method?: string;
+  path?: string;
+  query?: string;
+  key?: string;
+  label?: string;
+  resource?: string;
+  cache_status?: "HIT" | "MISS";
   bytes?: number;
   ttl_ms?: number;
 }
@@ -17,12 +18,14 @@ export interface PrefetchPrediction {
   stored: boolean;
   reason?: string;
   bytes?: number;
+  label?: string;
+  resource?: string;
 }
 
 export interface PrefetchEvent {
   type: "prefetch";
   sid: string;
-  history: string[];
+  history?: string[];
   predictions: PrefetchPrediction[];
 }
 

@@ -152,12 +152,15 @@ func PrefetchMiddleware(
 				return next(c) // unparseable query — skip caching, still serve
 			}
 			log.Printf("[mw] sid=%s %s %s key=%s", sid[:8], c.Request().Method, c.Request().URL.RequestURI(), key[:12])
+			label := humanLabel(c.Request().Method, c.Request().URL.Path, c.Request().URL.RawQuery, body)
 			publishEvent(Event{
-				Type:   "request",
-				SID:    sid,
-				Method: c.Request().Method,
-				Path:   c.Request().URL.RequestURI(),
-				Key:    key,
+				Type:    "request",
+				SID:     sid,
+				Method:  c.Request().Method,
+				Path:    c.Request().URL.RequestURI(),
+				Query:   c.Request().URL.RawQuery,
+				Key:     key,
+				Label:   label,
 			})
 
 			if v, found := cache.Get(key); found {
@@ -168,8 +171,10 @@ func PrefetchMiddleware(
 						SID:         sid,
 						Method:      c.Request().Method,
 						Path:        c.Request().URL.RequestURI(),
+						Query:       c.Request().URL.RawQuery,
 						Key:         key,
 						CacheStatus: "HIT",
+						Label:       label,
 					})
 					return writeCached(c, resp)
 				}
@@ -190,22 +195,28 @@ func PrefetchMiddleware(
 				if status == 0 {
 					status = http.StatusOK
 				}
+				body := rec.buf.Bytes()
+				rememberNameFromBody(body)
 				resp := &cachedResponse{
 					status:      status,
 					contentType: contentType,
-					body:        rec.buf.Bytes(),
+					body:        body,
 				}
 				cache.SetWithTTL(key, resp, int64(len(resp.body)), ttl)
 				log.Printf("[mw] sid=%s MISS→cached key=%s status=%d bytes=%d ttl=%s", sid[:8], key[:12], status, len(resp.body), ttl)
+				resource := extractResourceFromQuery(c.Request().URL.RawQuery)
 				publishEvent(Event{
 					Type:        "request",
 					SID:         sid,
 					Method:      c.Request().Method,
 					Path:        c.Request().URL.RequestURI(),
+					Query:       c.Request().URL.RawQuery,
 					Key:         key,
 					CacheStatus: "MISS",
 					Bytes:       len(resp.body),
 					TTLMs:       ttl.Milliseconds(),
+					Label:       label,
+					Resource:    resource,
 				})
 			} else {
 				log.Printf("[mw] sid=%s MISS no-header key=%s", sid[:8], key[:12])
@@ -214,8 +225,10 @@ func PrefetchMiddleware(
 					SID:         sid,
 					Method:      c.Request().Method,
 					Path:        c.Request().URL.RequestURI(),
+					Query:       c.Request().URL.RawQuery,
 					Key:         key,
 					CacheStatus: "MISS",
+					Label:       label,
 				})
 			}
 
@@ -252,7 +265,12 @@ func prefetch(p *Predictor, cache *ristretto.Cache, registry *PrefetchRegistry, 
 	out := make([]EventPrediction, 0, len(preds))
 	for i, pred := range preds {
 		log.Printf("[pre] sid=%s  [%d] p=%.4f call=%q", sid[:8], i, pred.Prob, pred.Call)
-		ep := EventPrediction{Call: pred.Call, Prob: pred.Prob}
+		method, path, query, _ := splitCall(pred.Call)
+		ep := EventPrediction{
+			Call:  pred.Call,
+			Prob:  pred.Prob,
+			Label: humanLabel(method, path, query, ""),
+		}
 		if pred.Call == "" || pred.Call == "END" {
 			ep.Reason = "end"
 			out = append(out, ep)
@@ -272,7 +290,7 @@ func prefetch(p *Predictor, cache *ristretto.Cache, registry *PrefetchRegistry, 
 			out = append(out, ep)
 			continue
 		}
-		method, path, _, _ := splitCall(pred.Call)
+		rememberNameFromBody(body)
 		key := CacheKey(method, path, query, "")
 		if key == "" {
 			log.Printf("[pre] sid=%s  [%d] SKIP empty-key for %q", sid[:8], i, pred.Call)
@@ -289,6 +307,10 @@ func prefetch(p *Predictor, cache *ristretto.Cache, registry *PrefetchRegistry, 
 		log.Printf("[pre] sid=%s  [%d] STORED key=%s call=%q bytes=%d ttl=%s", sid[:8], i, key[:12], pred.Call, len(body), ttl)
 		ep.Stored = true
 		ep.Bytes = len(body)
+		ep.Resource = extractResourceFromQuery(query)
+		if ep.Resource == "" && path == "/products" && query == "" {
+			ep.Resource = ""
+		}
 		out = append(out, ep)
 	}
 	publishEvent(Event{

@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
 import { ActivityPanel } from "./components/ActivityPanel";
-import { CacheBanner, buildEntry } from "./components/CacheBanner";
+import { CacheBanner, buildEntries } from "./components/CacheBanner";
 import { Header } from "./components/Header";
 import { ProductsView } from "./components/ProductsView";
 import { useEventStream } from "./hooks/useEventStream";
@@ -12,12 +12,15 @@ export default function App() {
   const [cachedEntries, setCachedEntries] = useState<CachedEntry[]>([]);
 
   const onPrefetch = useCallback((e: import("./lib/types").PrefetchEvent) => {
-    const next = buildEntry(e);
+    const next = buildEntries(e);
     if (next.length === 0) return;
     setCachedEntries((prev) => {
       const merged = [...prev];
       for (const n of next) {
-        if (!merged.some((m) => m.call === n.call)) merged.push(n);
+        const k = n.label + "|" + n.resource;
+        if (!merged.some((m) => m.label + "|" + m.resource === k)) {
+          merged.push(n);
+        }
       }
       return merged.slice(-12);
     });
@@ -36,12 +39,7 @@ export default function App() {
         missCount={missCount}
       />
 
-      <CacheBanner
-        entries={cachedEntries}
-        onExpire={(entry) => {
-          setCachedEntries((prev) => prev.filter((e) => e.call !== entry.call));
-        }}
-      />
+      <CacheBanner entries={cachedEntries} />
 
       <main className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_360px]">
         <section className="mx-auto max-w-[1100px] w-full px-6 lg:px-10 py-10">

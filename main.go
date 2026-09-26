@@ -73,7 +73,7 @@ func main() {
 	})
 
 	e := echo.New()
-	e.GET("/api/recent", RecentHandler)
+	e.GET("/api/activity", RecentHandler)
 	e.Use(PrefetchMiddleware(predictor, cache, registry, sessions, cfg.CacheTTL, cfg.CookieSecure))
 	e.GET("/products", ListProductsHandler(store, cfg.ImageBaseURL))
 	e.GET("/products/filter", FilterProductsPageHandler())
