@@ -178,6 +178,17 @@ func GetCartHandler(cart *CartStore, store *Store, imageBase string) echo.Handle
 	return func(c *echo.Context) error {
 		sid := ensureSID(c)
 		items := cart.List(sid)
+		if len(items) == 0 {
+			return c.JSON(http.StatusOK, map[string]any{"items": []any{}, "total": 0, "count": 0})
+		}
+		ids := make([]int64, len(items))
+		for i, it := range items {
+			ids[i] = it.ProductID
+		}
+		prods, err := store.GetProducts(c.Request().Context(), ids)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
 		type hydrated struct {
 			ProductID int64   `json:"product_id"`
 			Name      string  `json:"name"`
@@ -185,11 +196,11 @@ func GetCartHandler(cart *CartStore, store *Store, imageBase string) echo.Handle
 			ImageURL  string  `json:"image_url"`
 			Quantity  int     `json:"quantity"`
 		}
-		out := []hydrated{}
+		out := make([]hydrated, 0, len(items))
 		var total float64
 		for _, it := range items {
-			p, err := store.GetProduct(c.Request().Context(), it.ProductID)
-			if err != nil {
+			p, ok := prods[it.ProductID]
+			if !ok {
 				continue
 			}
 			pp := p.WithImageURL(imageBase)
@@ -240,11 +251,24 @@ func CheckoutHandler(cart *CartStore, store *Store, imageBase string) echo.Handl
 			Quantity int     `json:"quantity"`
 			Subtotal float64 `json:"subtotal"`
 		}
-		lines := []line{}
+		if len(items) == 0 {
+			return c.JSON(http.StatusOK, map[string]any{
+				"lines": []any{}, "subtotal": 0, "shipping": 0, "total": 0, "currency": "USD",
+			})
+		}
+		ids := make([]int64, len(items))
+		for i, it := range items {
+			ids[i] = it.ProductID
+		}
+		prods, err := store.GetProducts(c.Request().Context(), ids)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
+		lines := make([]line, 0, len(items))
 		var subtotal float64
 		for _, it := range items {
-			p, err := store.GetProduct(c.Request().Context(), it.ProductID)
-			if err != nil {
+			p, ok := prods[it.ProductID]
+			if !ok {
 				continue
 			}
 			pp := p.WithImageURL(imageBase)
@@ -298,16 +322,27 @@ func GetWishlistHandler(wish *WishlistStore, store *Store, imageBase string) ech
 	return func(c *echo.Context) error {
 		sid := ensureSID(c)
 		items := wish.List(sid)
+		if len(items) == 0 {
+			return c.JSON(http.StatusOK, map[string]any{"items": []any{}, "count": 0})
+		}
+		ids := make([]int64, len(items))
+		for i, it := range items {
+			ids[i] = it.ProductID
+		}
+		prods, err := store.GetProducts(c.Request().Context(), ids)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
 		type hydrated struct {
 			ProductID int64   `json:"product_id"`
 			Name      string  `json:"name"`
 			Price     float64 `json:"price"`
 			ImageURL  string  `json:"image_url"`
 		}
-		out := []hydrated{}
+		out := make([]hydrated, 0, len(items))
 		for _, it := range items {
-			p, err := store.GetProduct(c.Request().Context(), it.ProductID)
-			if err != nil {
+			p, ok := prods[it.ProductID]
+			if !ok {
 				continue
 			}
 			pp := p.WithImageURL(imageBase)

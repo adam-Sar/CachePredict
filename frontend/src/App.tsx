@@ -32,17 +32,7 @@ export default function App() {
 
   const onPrefetch = useCallback((e: import("./lib/types").PrefetchEvent) => {
     const next = buildEntries(e);
-    if (next.length === 0) return;
-    setCachedEntries((prev) => {
-      const merged = [...prev];
-      for (const n of next) {
-        const k = n.label + "|" + n.resource;
-        if (!merged.some((m) => m.label + "|" + m.resource === k)) {
-          merged.push(n);
-        }
-      }
-      return merged.slice(-12);
-    });
+    setCachedEntries(next);
   }, []);
 
   const { hitCount, missCount } = useMemo(() => countStats(requests), [requests]);

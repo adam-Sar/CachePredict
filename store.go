@@ -133,6 +133,34 @@ func (s *Store) GetProduct(ctx context.Context, id int64) (*Product, error) {
 	return &result[0], nil
 }
 
+// GetProducts fetches many products in a single round-trip using PostgREST's
+// in=() filter. The returned map is keyed by Product.ID so callers can resolve
+// their own ordering. Missing IDs are simply absent from the map.
+func (s *Store) GetProducts(ctx context.Context, ids []int64) (map[int64]Product, error) {
+	if len(ids) == 0 {
+		return map[int64]Product{}, nil
+	}
+	seen := make(map[int64]struct{}, len(ids))
+	parts := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		parts = append(parts, strconv.FormatInt(id, 10))
+	}
+	q := "id=in.(" + strings.Join(parts, ",") + ")&select=*"
+	var rows []Product
+	if err := s.doRequest(ctx, http.MethodGet, "/products", q, &rows); err != nil {
+		return nil, err
+	}
+	out := make(map[int64]Product, len(rows))
+	for _, p := range rows {
+		out[p.ID] = p
+	}
+	return out, nil
+}
+
 func (s *Store) FilterProducts(ctx context.Context, opts FilterOptions) ([]Product, error) {
 	var result []Product
 	if err := s.doRequest(ctx, http.MethodGet, "/products", buildFilterQuery(opts), &result); err != nil {

@@ -70,31 +70,54 @@ func main() {
 		}
 		return json.Marshal(map[string]any{"products": output, "count": len(output)})
 	})
-	registry.Register("GET", "/products/filter", func(ctx context.Context, query string) ([]byte, error) {
-		return json.Marshal(map[string]any{"filters": map[string]any{}})
-	})
 	registry.Register("GET", "/home", func(ctx context.Context, query string) ([]byte, error) {
+		products, err := store.ListProducts(ctx)
+		if err != nil {
+			return nil, err
+		}
+		featured := products
+		if len(featured) > 4 {
+			featured = featured[:4]
+		}
+		out := make([]ProductWithImageURL, 0, len(featured))
+		for _, p := range featured {
+			out = append(out, p.WithImageURL(cfg.ImageBaseURL))
+		}
 		return json.Marshal(map[string]any{
-			"hero":    "New season. Cached.",
-			"featured": []any{},
-			"sections": []map[string]string{},
+			"hero":     "New season. Cached.",
+			"featured": out,
+			"sections": []map[string]string{
+				{"id": "trending", "title": "Trending now"},
+				{"id": "new", "title": "New arrivals"},
+				{"id": "bestsellers", "title": "Best sellers"},
+			},
 		})
 	})
 	registry.Register("GET", "/search", func(ctx context.Context, query string) ([]byte, error) {
 		vals, _ := url.ParseQuery(query)
-		return json.Marshal(map[string]any{
-			"query":    vals.Get("q"),
-			"products": []any{},
-			"count":    0,
-		})
+		q := vals.Get("q")
+		products, err := store.SearchProducts(ctx, q)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]ProductWithImageURL, 0, len(products))
+		for _, p := range products {
+			out = append(out, p.WithImageURL(cfg.ImageBaseURL))
+		}
+		return json.Marshal(map[string]any{"query": q, "products": out, "count": len(out)})
 	})
 	registry.Register("GET", "/category", func(ctx context.Context, query string) ([]byte, error) {
 		vals, _ := url.ParseQuery(query)
-		return json.Marshal(map[string]any{
-			"category": vals.Get("type"),
-			"products": []any{},
-			"count":    0,
-		})
+		t := vals.Get("type")
+		products, err := store.ListByCategory(ctx, t)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]ProductWithImageURL, 0, len(products))
+		for _, p := range products {
+			out = append(out, p.WithImageURL(cfg.ImageBaseURL))
+		}
+		return json.Marshal(map[string]any{"category": t, "products": out, "count": len(out)})
 	})
 	registry.Register("GET", "/reviews", func(ctx context.Context, query string) ([]byte, error) {
 		vals, _ := url.ParseQuery(query)
@@ -108,6 +131,12 @@ func main() {
 	})
 	registry.Register("GET", "/cart", func(ctx context.Context, query string) ([]byte, error) {
 		return json.Marshal(map[string]any{"items": []any{}, "total": 0, "count": 0})
+	})
+	registry.Register("GET", "/wishlist", func(ctx context.Context, query string) ([]byte, error) {
+		return json.Marshal(map[string]any{"items": []any{}, "count": 0})
+	})
+	registry.Register("GET", "/checkout", func(ctx context.Context, query string) ([]byte, error) {
+		return json.Marshal(map[string]any{"lines": []any{}, "subtotal": 0, "shipping": 0, "total": 0, "currency": "USD"})
 	})
 
 	e := echo.New()

@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { LiveEvent, PrefetchEvent, RequestEvent } from "../lib/types";
 
-const POLL_MS = 1500;
-const MAX_LOG = 60;
+const POLL_MS = 600;
+const MAX_LOG = 80;
 
 export interface ActivityItem {
   id: number;

@@ -156,15 +156,6 @@ func PrefetchMiddleware(
 			}
 			log.Printf("[mw] sid=%s %s %s key=%s", sid[:8], c.Request().Method, c.Request().URL.RequestURI(), key[:12])
 			label := humanLabel(c.Request().Method, c.Request().URL.Path, c.Request().URL.RawQuery, body)
-			publishEvent(Event{
-				Type:    "request",
-				SID:     sid,
-				Method:  c.Request().Method,
-				Path:    c.Request().URL.RequestURI(),
-				Query:   c.Request().URL.RawQuery,
-				Key:     key,
-				Label:   label,
-			})
 
 			if v, found := cache.Get(key); found {
 				if resp, ok := v.(*cachedResponse); ok {
@@ -178,6 +169,7 @@ func PrefetchMiddleware(
 						Key:         key,
 						CacheStatus: "HIT",
 						Label:       label,
+						Resource:    extractResourceFromQuery(c.Request().URL.RawQuery),
 					})
 					return writeCached(c, resp)
 				}
@@ -198,12 +190,12 @@ func PrefetchMiddleware(
 				if status == 0 {
 					status = http.StatusOK
 				}
-				body := rec.buf.Bytes()
-				rememberNameFromBody(body)
+				respBody := rec.buf.Bytes()
+				rememberNameFromBody(respBody)
 				resp := &cachedResponse{
 					status:      status,
 					contentType: contentType,
-					body:        body,
+					body:        respBody,
 				}
 				cache.SetWithTTL(key, resp, int64(len(resp.body)), ttl)
 				log.Printf("[mw] sid=%s MISS→cached key=%s status=%d bytes=%d ttl=%s", sid[:8], key[:12], status, len(resp.body), ttl)
