@@ -126,9 +126,12 @@ func PrefetchMiddleware(
 	ttl time.Duration,
 	cookieSecure bool,
 ) echo.MiddlewareFunc {
-	return func(next echo.HandlerFunc) echo.HandlerFunc {
-		return func(c *echo.Context) error {
-			// Per-session history: create + cookie on first hit, then append.
+		return func(next echo.HandlerFunc) echo.HandlerFunc {
+			return func(c *echo.Context) error {
+				if c.Request().URL.Path == "/api/activity" {
+					return next(c) // bypass caching, logging, prefetch
+				}
+				// Per-session history: create + cookie on first hit, then append.
 			sid := sessionIDFromRequest(c)
 			if sid == "" {
 				sid = NewSessionID()

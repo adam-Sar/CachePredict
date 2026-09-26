@@ -40,6 +40,7 @@ type EventPrediction struct {
 	Resource string  `json:"resource,omitempty"`
 }
 
+const eventLogCap = 60
 const nameCacheMax = 200
 
 var (
@@ -69,8 +70,8 @@ func UnsubscribeEvents(ch chan Event) {
 func publishEvent(e Event) {
 	eventMu.Lock()
 	eventLog = append(eventLog, e)
-	if len(eventLog) > nameCacheMax*2 {
-		eventLog = eventLog[len(eventLog)-(nameCacheMax*2):]
+	if len(eventLog) > eventLogCap {
+		eventLog = eventLog[len(eventLog)-eventLogCap:]
 	}
 	eventMu.Unlock()
 
@@ -251,8 +252,8 @@ func RecentHandler(c *echo.Context) error {
 	}
 	eventMu.RUnlock()
 
-	if len(out) > 100 {
-		out = out[len(out)-100:]
+	if len(out) > 40 {
+		out = out[len(out)-40:]
 	}
 	return c.JSON(200, map[string]any{"events": out})
 }
