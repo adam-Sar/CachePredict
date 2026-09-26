@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -173,31 +175,29 @@ func ReviewsHandler(c *echo.Context) error {
 	})
 }
 
-// GetCartHandler returns the caller's cart hydrated with product info and total.
-func GetCartHandler(cart *CartStore, store *Store, imageBase string) echo.HandlerFunc {
-	return func(c *echo.Context) error {
-		sid := ensureSID(c)
-		items := cart.List(sid)
-		if len(items) == 0 {
-			return c.JSON(http.StatusOK, map[string]any{"items": []any{}, "total": 0, "count": 0})
-		}
+// hydrateCartJSON builds the GET /cart response body, shared by the handler
+// and the prefetch registry so warmed entries are byte-identical.
+func hydrateCartJSON(ctx context.Context, cart *CartStore, store *Store, imageBase, sid string) ([]byte, error) {
+	items := cart.List(sid)
+	type hydrated struct {
+		ProductID int64   `json:"product_id"`
+		Name      string  `json:"name"`
+		Price     float64 `json:"price"`
+		ImageURL  string  `json:"image_url"`
+		Quantity  int     `json:"quantity"`
+	}
+	out := []hydrated{}
+	var total float64
+	if len(items) > 0 {
 		ids := make([]int64, len(items))
 		for i, it := range items {
 			ids[i] = it.ProductID
 		}
-		prods, err := store.GetProducts(c.Request().Context(), ids)
+		prods, err := store.GetProducts(ctx, ids)
 		if err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return nil, err
 		}
-		type hydrated struct {
-			ProductID int64   `json:"product_id"`
-			Name      string  `json:"name"`
-			Price     float64 `json:"price"`
-			ImageURL  string  `json:"image_url"`
-			Quantity  int     `json:"quantity"`
-		}
-		out := make([]hydrated, 0, len(items))
-		var total float64
+		out = make([]hydrated, 0, len(items))
 		for _, it := range items {
 			p, ok := prods[it.ProductID]
 			if !ok {
@@ -213,11 +213,19 @@ func GetCartHandler(cart *CartStore, store *Store, imageBase string) echo.Handle
 			})
 			total += pp.Price * float64(it.Quantity)
 		}
-		return c.JSON(http.StatusOK, map[string]any{
-			"items": out,
-			"total": total,
-			"count": len(out),
-		})
+	}
+	return json.Marshal(map[string]any{"items": out, "total": total, "count": len(out)})
+}
+
+// GetCartHandler returns the caller's cart hydrated with product info and total.
+func GetCartHandler(cart *CartStore, store *Store, imageBase string) echo.HandlerFunc {
+	return func(c *echo.Context) error {
+		sid := ensureSID(c)
+		b, err := hydrateCartJSON(c.Request().Context(), cart, store, imageBase, sid)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
+		return c.Blob(http.StatusOK, "application/json", b)
 	}
 }
 
@@ -240,32 +248,27 @@ func AddToCartHandler(cart *CartStore) echo.HandlerFunc {
 	}
 }
 
-// CheckoutHandler handles GET /checkout. Returns line items, subtotal, shipping, total.
-func CheckoutHandler(cart *CartStore, store *Store, imageBase string) echo.HandlerFunc {
-	return func(c *echo.Context) error {
-		sid := ensureSID(c)
-		items := cart.List(sid)
-		type line struct {
-			Name     string  `json:"name"`
-			Price    float64 `json:"price"`
-			Quantity int     `json:"quantity"`
-			Subtotal float64 `json:"subtotal"`
-		}
-		if len(items) == 0 {
-			return c.JSON(http.StatusOK, map[string]any{
-				"lines": []any{}, "subtotal": 0, "shipping": 0, "total": 0, "currency": "USD",
-			})
-		}
+// hydrateCheckoutJSON builds the exact GET /checkout response body.
+func hydrateCheckoutJSON(ctx context.Context, cart *CartStore, store *Store, imageBase, sid string) ([]byte, error) {
+	items := cart.List(sid)
+	type line struct {
+		Name     string  `json:"name"`
+		Price    float64 `json:"price"`
+		Quantity int     `json:"quantity"`
+		Subtotal float64 `json:"subtotal"`
+	}
+	lines := []line{}
+	var subtotal float64
+	if len(items) > 0 {
 		ids := make([]int64, len(items))
 		for i, it := range items {
 			ids[i] = it.ProductID
 		}
-		prods, err := store.GetProducts(c.Request().Context(), ids)
+		prods, err := store.GetProducts(ctx, ids)
 		if err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return nil, err
 		}
-		lines := make([]line, 0, len(items))
-		var subtotal float64
+		lines = make([]line, 0, len(items))
 		for _, it := range items {
 			p, ok := prods[it.ProductID]
 			if !ok {
@@ -281,22 +284,44 @@ func CheckoutHandler(cart *CartStore, store *Store, imageBase string) echo.Handl
 				Subtotal: sub,
 			})
 		}
-		shipping := 0.0
-		if subtotal > 0 && subtotal < 50 {
-			shipping = 5.99
+	}
+	shipping := 0.0
+	if subtotal > 0 && subtotal < 50 {
+		shipping = 5.99
+	}
+	return json.Marshal(map[string]any{
+		"lines":    lines,
+		"subtotal": subtotal,
+		"shipping": shipping,
+		"total":    subtotal + shipping,
+		"currency": "USD",
+	})
+}
+
+// CheckoutHandler handles GET /checkout. Returns line items, subtotal, shipping, total.
+func CheckoutHandler(cart *CartStore, store *Store, imageBase string) echo.HandlerFunc {
+	return func(c *echo.Context) error {
+		sid := ensureSID(c)
+		b, err := hydrateCheckoutJSON(c.Request().Context(), cart, store, imageBase, sid)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		}
-		return c.JSON(http.StatusOK, map[string]any{
-			"lines":    lines,
-			"subtotal": subtotal,
-			"shipping": shipping,
-			"total":    subtotal + shipping,
-			"currency": "USD",
-		})
+		return c.Blob(http.StatusOK, "application/json", b)
 	}
 }
 
-// PaymentHandler handles POST /payment. Body: {amount, method}. Clears the cart
-// on confirmed payment.
+// paymentJSON builds the POST /payment response body (body-independent so
+// the prefetch stub and the handler produce the same shape).
+func paymentJSON() []byte {
+	b, _ := json.Marshal(map[string]any{
+		"status":   "confirmed",
+		"order_id": fmt.Sprintf("ORD-%d", time.Now().Unix()),
+		"currency": "USD",
+	})
+	return b
+}
+
+// PaymentHandler handles POST /payment. Clears the cart on confirmed payment.
 func PaymentHandler(cart *CartStore) echo.HandlerFunc {
 	return func(c *echo.Context) error {
 		sid := ensureSID(c)
@@ -304,42 +329,32 @@ func PaymentHandler(cart *CartStore) echo.HandlerFunc {
 			Amount float64 `json:"amount"`
 			Method string  `json:"method"`
 		}
-		if err := c.Bind(&body); err != nil {
-			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
-		}
+		_ = c.Bind(&body)
 		cart.Clear(sid)
-		return c.JSON(http.StatusOK, map[string]any{
-			"status":   "confirmed",
-			"order_id": fmt.Sprintf("ORD-%d", time.Now().Unix()),
-			"amount":   body.Amount,
-			"method":   body.Method,
-		})
+		return c.Blob(http.StatusOK, "application/json", paymentJSON())
 	}
 }
 
-// GetWishlistHandler returns the caller's wishlist.
-func GetWishlistHandler(wish *WishlistStore, store *Store, imageBase string) echo.HandlerFunc {
-	return func(c *echo.Context) error {
-		sid := ensureSID(c)
-		items := wish.List(sid)
-		if len(items) == 0 {
-			return c.JSON(http.StatusOK, map[string]any{"items": []any{}, "count": 0})
-		}
+// hydrateWishlistJSON builds the exact GET /wishlist response body.
+func hydrateWishlistJSON(ctx context.Context, wish *WishlistStore, store *Store, imageBase, sid string) ([]byte, error) {
+	items := wish.List(sid)
+	type hydrated struct {
+		ProductID int64   `json:"product_id"`
+		Name      string  `json:"name"`
+		Price     float64 `json:"price"`
+		ImageURL  string  `json:"image_url"`
+	}
+	out := []hydrated{}
+	if len(items) > 0 {
 		ids := make([]int64, len(items))
 		for i, it := range items {
 			ids[i] = it.ProductID
 		}
-		prods, err := store.GetProducts(c.Request().Context(), ids)
+		prods, err := store.GetProducts(ctx, ids)
 		if err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return nil, err
 		}
-		type hydrated struct {
-			ProductID int64   `json:"product_id"`
-			Name      string  `json:"name"`
-			Price     float64 `json:"price"`
-			ImageURL  string  `json:"image_url"`
-		}
-		out := make([]hydrated, 0, len(items))
+		out = make([]hydrated, 0, len(items))
 		for _, it := range items {
 			p, ok := prods[it.ProductID]
 			if !ok {
@@ -353,10 +368,19 @@ func GetWishlistHandler(wish *WishlistStore, store *Store, imageBase string) ech
 				ImageURL:  pp.ImageURL,
 			})
 		}
-		return c.JSON(http.StatusOK, map[string]any{
-			"items": out,
-			"count": len(out),
-		})
+	}
+	return json.Marshal(map[string]any{"items": out, "count": len(out)})
+}
+
+// GetWishlistHandler returns the caller's wishlist.
+func GetWishlistHandler(wish *WishlistStore, store *Store, imageBase string) echo.HandlerFunc {
+	return func(c *echo.Context) error {
+		sid := ensureSID(c)
+		b, err := hydrateWishlistJSON(c.Request().Context(), wish, store, imageBase, sid)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
+		return c.Blob(http.StatusOK, "application/json", b)
 	}
 }
 

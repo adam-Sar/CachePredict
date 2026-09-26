@@ -59,7 +59,7 @@ export function CheckoutView({ navigate }: CheckoutViewProps) {
           {confirmed.order_id}
         </h1>
         <p className="font-display-italic text-[18px] text-inkmute">
-          ${confirmed.amount.toFixed(2)} charged to {confirmed.method}.
+          Payment confirmed. Thank you.
         </p>
         <button
           onClick={() => navigate(HOME)}

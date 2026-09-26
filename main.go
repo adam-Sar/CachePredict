@@ -1,4 +1,4 @@
-package main
+﻿package main
 
 import (
 	"context"
@@ -47,7 +47,7 @@ func main() {
 	wishlist := NewWishlistStore()
 
 	registry := NewPrefetchRegistry()
-	registry.Register("GET", "/products", func(ctx context.Context, query string) ([]byte, error) {
+	registry.Register("GET", "/products", func(ctx context.Context, sid, query string) ([]byte, error) {
 		vals, _ := url.ParseQuery(query)
 		if idStr := vals.Get("id"); idStr != "" {
 			id, err := strconv.ParseInt(idStr, 10, 64)
@@ -70,7 +70,7 @@ func main() {
 		}
 		return json.Marshal(map[string]any{"products": output, "count": len(output)})
 	})
-	registry.Register("GET", "/home", func(ctx context.Context, query string) ([]byte, error) {
+	registry.Register("GET", "/home", func(ctx context.Context, sid, query string) ([]byte, error) {
 		products, err := store.ListProducts(ctx)
 		if err != nil {
 			return nil, err
@@ -93,7 +93,7 @@ func main() {
 			},
 		})
 	})
-	registry.Register("GET", "/search", func(ctx context.Context, query string) ([]byte, error) {
+	registry.Register("GET", "/search", func(ctx context.Context, sid, query string) ([]byte, error) {
 		vals, _ := url.ParseQuery(query)
 		q := vals.Get("q")
 		products, err := store.SearchProducts(ctx, q)
@@ -106,7 +106,7 @@ func main() {
 		}
 		return json.Marshal(map[string]any{"query": q, "products": out, "count": len(out)})
 	})
-	registry.Register("GET", "/category", func(ctx context.Context, query string) ([]byte, error) {
+	registry.Register("GET", "/category", func(ctx context.Context, sid, query string) ([]byte, error) {
 		vals, _ := url.ParseQuery(query)
 		t := vals.Get("type")
 		products, err := store.ListByCategory(ctx, t)
@@ -119,7 +119,7 @@ func main() {
 		}
 		return json.Marshal(map[string]any{"category": t, "products": out, "count": len(out)})
 	})
-	registry.Register("GET", "/reviews", func(ctx context.Context, query string) ([]byte, error) {
+	registry.Register("GET", "/reviews", func(ctx context.Context, sid, query string) ([]byte, error) {
 		vals, _ := url.ParseQuery(query)
 		return json.Marshal(map[string]any{
 			"product_id":      vals.Get("product_id"),
@@ -129,14 +129,17 @@ func main() {
 			"would_recommend": 0.92,
 		})
 	})
-	registry.Register("GET", "/cart", func(ctx context.Context, query string) ([]byte, error) {
-		return json.Marshal(map[string]any{"items": []any{}, "total": 0, "count": 0})
+	registry.Register("GET", "/cart", func(ctx context.Context, sid, query string) ([]byte, error) {
+		return hydrateCartJSON(ctx, cart, store, cfg.ImageBaseURL, sid)
 	})
-	registry.Register("GET", "/wishlist", func(ctx context.Context, query string) ([]byte, error) {
-		return json.Marshal(map[string]any{"items": []any{}, "count": 0})
+	registry.Register("GET", "/wishlist", func(ctx context.Context, sid, query string) ([]byte, error) {
+		return hydrateWishlistJSON(ctx, wishlist, store, cfg.ImageBaseURL, sid)
 	})
-	registry.Register("GET", "/checkout", func(ctx context.Context, query string) ([]byte, error) {
-		return json.Marshal(map[string]any{"lines": []any{}, "subtotal": 0, "shipping": 0, "total": 0, "currency": "USD"})
+	registry.Register("GET", "/checkout", func(ctx context.Context, sid, query string) ([]byte, error) {
+		return hydrateCheckoutJSON(ctx, cart, store, cfg.ImageBaseURL, sid)
+	})
+	registry.Register("POST", "/payment", func(ctx context.Context, sid, query string) ([]byte, error) {
+		return paymentJSON(), nil
 	})
 
 	e := echo.New()

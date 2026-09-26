@@ -1,4 +1,4 @@
-package main
+﻿package main
 
 import (
 	"bytes"
@@ -42,7 +42,7 @@ func TestSplitCall(t *testing.T) {
 func TestPrefetchRegistryLookup(t *testing.T) {
 	called := false
 	reg := NewPrefetchRegistry()
-	reg.Register("GET", "/products", func(ctx context.Context, query string) ([]byte, error) {
+	reg.Register("GET", "/products", func(ctx context.Context, sid, query string) ([]byte, error) {
 		called = true
 		return []byte(`{"ok":true,"q":"` + query + `"}`), nil
 	})
@@ -55,7 +55,7 @@ func TestPrefetchRegistryLookup(t *testing.T) {
 		if query != "" {
 			t.Errorf("query = %q, want empty", query)
 		}
-		body, err := fn(context.Background(), query)
+		body, err := fn(context.Background(), "test-sid", query)
 		if err != nil {
 			t.Fatalf("fn error: %v", err)
 		}
@@ -102,14 +102,14 @@ func TestPrefetchRegistryLookup(t *testing.T) {
 	})
 
 	t.Run("error propagates from fn", func(t *testing.T) {
-		reg.Register("GET", "/err", func(ctx context.Context, query string) ([]byte, error) {
+		reg.Register("GET", "/err", func(ctx context.Context, sid, query string) ([]byte, error) {
 			return nil, errors.New("boom")
 		})
 		fn, _ := reg.Lookup("GET /err")
 		if fn == nil {
 			t.Fatal("Lookup returned nil for /err")
 		}
-		if _, err := fn(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "boom") {
+		if _, err := fn(context.Background(), "test-sid", ""); err == nil || !strings.Contains(err.Error(), "boom") {
 			t.Errorf("expected boom error, got %v", err)
 		}
 	})

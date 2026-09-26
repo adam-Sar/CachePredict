@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -54,8 +55,10 @@ type cachedResponse struct {
 // Implementations must return the exact bytes the matching handler would
 // emit so the cache stays consistent across prefetch and real requests.
 // The query argument is the parsed query string from the predicted call
-// (without the leading "?"), or "" when the call had no query.
-type PrefetchFunc func(ctx context.Context, query string) ([]byte, error)
+// (without the leading "?"), or "" when the call had no query. The sid
+// argument lets session-scoped endpoints (cart, wishlist, checkout) hydrate
+// the same data the real request would return.
+type PrefetchFunc func(ctx context.Context, sid, query string) ([]byte, error)
 
 // PrefetchRegistry maps "METHOD /path" to a PrefetchFunc. Predicted calls
 // include their query string, but dispatch is method+path only; the query
@@ -131,13 +134,13 @@ func PrefetchMiddleware(
 				if c.Request().URL.Path == "/api/activity" {
 					return next(c) // bypass caching, logging, prefetch
 				}
-				// Per-session history: create + cookie on first hit, then append.
+				// History tokens must match the predictor vocabulary exactly.
 			sid := sessionIDFromRequest(c)
 			if sid == "" {
 				sid = NewSessionID()
 				writeSessionCookie(c, sid, cookieSecure)
 			}
-			sessions.AddCall(sid, c.Request().Method+" "+c.Request().URL.Path)
+			sessions.AddCall(sid, historyToken(c.Request().Method, c.Request().URL))
 
 			// Read body once (for cache key) and restore it for the handler.
 			// GET/HEAD/DELETE/OPTIONS carry no defined body, so skip reading
@@ -171,6 +174,10 @@ func PrefetchMiddleware(
 						Label:       label,
 						Resource:    extractResourceFromQuery(c.Request().URL.RawQuery),
 					})
+					// Keep prefetching so the next call is already warm.
+					if p != nil && registry != nil {
+						go prefetch(p, cache, registry, sessions, sid, ttl)
+					}
 					return writeCached(c, resp)
 				}
 			}
@@ -192,13 +199,17 @@ func PrefetchMiddleware(
 				}
 				respBody := rec.buf.Bytes()
 				rememberNameFromBody(respBody)
-				resp := &cachedResponse{
-					status:      status,
-					contentType: contentType,
-					body:        respBody,
+				if isMutatingPost(c.Request().Method, c.Request().URL.Path) {
+					log.Printf("[mw] sid=%s MISS→no-store key=%s (mutating POST)", sid[:8], key[:12])
+				} else {
+					resp := &cachedResponse{
+						status:      status,
+						contentType: contentType,
+						body:        respBody,
+					}
+					cache.SetWithTTL(key, resp, int64(len(resp.body)), ttl)
+					log.Printf("[mw] sid=%s MISS→cached key=%s status=%d bytes=%d ttl=%s", sid[:8], key[:12], status, len(resp.body), ttl)
 				}
-				cache.SetWithTTL(key, resp, int64(len(resp.body)), ttl)
-				log.Printf("[mw] sid=%s MISS→cached key=%s status=%d bytes=%d ttl=%s", sid[:8], key[:12], status, len(resp.body), ttl)
 				resource := extractResourceFromQuery(c.Request().URL.RawQuery)
 				publishEvent(Event{
 					Type:        "request",
@@ -208,7 +219,7 @@ func PrefetchMiddleware(
 					Query:       c.Request().URL.RawQuery,
 					Key:         key,
 					CacheStatus: "MISS",
-					Bytes:       len(resp.body),
+					Bytes:       len(respBody),
 					TTLMs:       ttl.Milliseconds(),
 					Label:       label,
 					Resource:    resource,
@@ -245,6 +256,21 @@ func writeCached(c *echo.Context, resp *cachedResponse) error {
 	return err
 }
 
+// isMutatingPost reports POSTs whose side effect must never be skipped by a
+// cache replay (adding to cart/wishlist changes server state).
+func isMutatingPost(method, path string) bool {
+	return method == http.MethodPost && (path == "/cart" || path == "/wishlist")
+}
+
+// historyToken formats a request as a predictor-vocabulary token:
+// "METHOD /path", with the query kept only for /products and /reviews.
+func historyToken(method string, u *url.URL) string {
+	if u.RawQuery != "" && (u.Path == "/products" || u.Path == "/reviews") {
+		return method + " " + u.RequestURI()
+	}
+	return method + " " + u.Path
+}
+
 // prefetch runs the predictor on the session history and warms the cache for
 // each prediction that has a registered PrefetchFunc. Anything unregistered or
 // unparseable is silently dropped. Runs as a goroutine; errors only log.
@@ -271,6 +297,22 @@ func prefetch(p *Predictor, cache *ristretto.Cache, registry *PrefetchRegistry, 
 			out = append(out, ep)
 			continue
 		}
+		// Mutations can't be cached; warm the view the user lands on instead.
+		if isMutatingPost(method, path) {
+			if path == "/cart" {
+				pred.Call = "GET /cart"
+			} else {
+				pred.Call = "GET /wishlist"
+			}
+			method, path, query, _ = splitCall(pred.Call)
+			ep.Call = pred.Call
+			ep.Label = humanLabel(method, path, query, "")
+		}
+		if method == http.MethodPost && path == "/products/filter" {
+			// Predictor can't know the filter body; a warmed key could never HIT.
+			log.Printf("[pre] sid=%s  [%d] SKIP filter body unknown", sid[:8], i)
+			continue
+		}
 		fn, query := registry.Lookup(pred.Call)
 		if fn == nil {
 			log.Printf("[pre] sid=%s  [%d] SKIP no-registered-handler for %q", sid[:8], i, pred.Call)
@@ -278,7 +320,7 @@ func prefetch(p *Predictor, cache *ristretto.Cache, registry *PrefetchRegistry, 
 			out = append(out, ep)
 			continue
 		}
-		body, err := fn(context.Background(), query)
+		body, err := fn(context.Background(), sid, query)
 		if err != nil || len(body) == 0 {
 			log.Printf("[pre] sid=%s  [%d] SKIP fn-err=%v bytes=%d for %q", sid[:8], i, err, len(body), pred.Call)
 			ep.Reason = "fn-error"

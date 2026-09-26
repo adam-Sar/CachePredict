@@ -3,6 +3,7 @@ import { addToCart, getProduct, addToWishlist } from "../lib/api";
 import type { ProductDetailResponse, Product } from "../lib/types";
 import type { Navigate, ViewState } from "../lib/view";
 import { CART, WISHLIST } from "../lib/view";
+import { ReviewsView } from "./ReviewsView";
 import { SectionHead } from "./Shared";
 
 interface ProductViewProps {
@@ -16,10 +17,12 @@ export function ProductView({ productId, navigate, bumpCart }: ProductViewProps)
   const [status, setStatus] = useState<"HIT" | "MISS" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [showReviews, setShowReviews] = useState(false);
 
   useEffect(() => {
     if (!productId) return;
     setError(null);
+    setShowReviews(false);
     getProduct(productId)
       .then((r) => {
         setData(r.data);
@@ -122,6 +125,15 @@ export function ProductView({ productId, navigate, bumpCart }: ProductViewProps)
             >
               View wishlist →
             </button>
+          </div>
+          <div className="border-t border-rule pt-6">
+            <button
+              onClick={() => setShowReviews((v) => !v)}
+              className="font-mono text-[11px] uppercase tracking-[0.16em] text-taupe hover:text-rust"
+            >
+              {showReviews ? "▾ Hide reviews" : "▸ Show reviews"}
+            </button>
+            {showReviews && <div className="mt-6"><ReviewsView productId={p.id} /></div>}
           </div>
         </div>
       </div>

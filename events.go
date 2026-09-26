@@ -247,7 +247,10 @@ func humanLabel(method, path, query, body string) string {
 			Amount float64 `json:"amount"`
 		}
 		_ = json.Unmarshal([]byte(body), &opts)
-		return fmt.Sprintf("Pay $%.2f", opts.Amount)
+		if opts.Amount > 0 {
+			return fmt.Sprintf("Pay $%.2f", opts.Amount)
+		}
+		return "Confirm payment"
 	case path == "/wishlist":
 		if method == "POST" {
 			var opts struct {

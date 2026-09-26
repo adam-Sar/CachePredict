@@ -49,10 +49,9 @@ func CacheKey(method, path, rawQuery, body string) string {
 	if rawQuery != "" {
 		canonical += "?" + rawQuery
 	}
-	// GET/HEAD/DELETE/OPTIONS have no defined body semantics; clients that
-	// erroneously attach one (Postman, some proxies) would otherwise miss
-	// every prefetched entry because the predictor warms keys with body="".
-	if body != "" && !isBodylessMethod(method) {
+	// GET/HEAD/DELETE/OPTIONS have no defined body semantics. POST /payment
+	// is body-agnostic too, so prefetch (body="") collides with real requests.
+	if body != "" && !isBodylessMethod(method) && !isBodyAgnosticPath(method, path) {
 		canonical += " body=" + body
 	}
 
@@ -66,4 +65,11 @@ func isBodylessMethod(method string) bool {
 		return true
 	}
 	return false
+}
+
+// isBodyAgnosticPath reports paths whose cached response does not depend on
+// the request body, so the cache key ignores it and prefetched entries
+// (always warmed with body="") collide with real requests.
+func isBodyAgnosticPath(method, path string) bool {
+	return strings.ToUpper(method) == "POST" && path == "/payment"
 }

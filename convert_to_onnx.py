@@ -78,12 +78,8 @@ else:
 from sklearn.preprocessing import LabelEncoder
 
 print("\nsaving tokenizer ...")
-csv = "synthetic_api_calls.csv"
-df = tf.keras.utils.get_file("synthetic_api_calls.csv", "") if False else None
 import pandas as pd
-df = pd.read_csv(csv)
-df["url_params"] = df["url_params"].fillna("")
-df["body"] = df["body"].fillna("")
+df = pd.read_csv("synthetic_api_calls.csv")
 
 all_calls = pd.concat([df["current_call"], df["next_call"]]).unique()
 le = LabelEncoder().fit(all_calls)

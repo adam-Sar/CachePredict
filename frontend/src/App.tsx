@@ -94,16 +94,11 @@ function ViewRouter({ view, navigate, cartVersion, bumpCart }: ViewRouterProps) 
       return <CategoryView category={view.category ?? ""} navigate={navigate} />;
     case "product":
       return (
-        <div className="space-y-10">
-          <ProductView
-            productId={view.productId ?? 0}
-            navigate={navigate}
-            bumpCart={bumpCart}
-          />
-          {view.productId ? (
-            <ReviewsView productId={view.productId} />
-          ) : null}
-        </div>
+        <ProductView
+          productId={view.productId ?? 0}
+          navigate={navigate}
+          bumpCart={bumpCart}
+        />
       );
     case "cart":
       return <CartView navigate={navigate} refreshKey={cartVersion} />;

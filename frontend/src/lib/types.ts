@@ -106,8 +106,7 @@ export interface CheckoutResponse {
 export interface PaymentResponse {
   status: string;
   order_id: string;
-  amount: number;
-  method: string;
+  currency: string;
 }
 
 export interface WishlistResponse {

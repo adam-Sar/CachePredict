@@ -1,363 +1,248 @@
-"""
-Synthetic e-commerce API session data generator for Next API Call Prediction
-(matching the Go API in main.go + the example flows requested).
+﻿"""
+Synthetic e-commerce API session generator for Next API Call Prediction.
 
-Outputs synthetic_api_calls.csv with one row per (session, step), and explicit
-current_call -> next_call columns ready for LSTM training.
+IMPORTANT: every emitted token MUST match exactly what the Go middleware
+records in session history:  "METHOD /path?query"  (RequestURI, no body).
+Bodies are never visible to the predictor, so POST tokens carry no body.
+
+The funnel is intentionally dominant: if a session reaches GET /checkout the
+next call is POST /payment with very high probability, so the trained model
+"memorizes" the logical commerce flow (cart -> checkout -> payment).
+
+Outputs synthetic_api_calls.csv with (session, step, current_call, next_call).
 """
 
 import csv
-import json
 import random
 from pathlib import Path
 
-random.seed(42)
+random.seed(1337)
 
-# ---------------------------------------------------------------------------
-# Catalog
-# ---------------------------------------------------------------------------
-# (id, category, gender, price_bucket)
-WOMEN = [
-    (42, "skirt",  "female", "mid"),   # user's literal example id
-    (44, "skirt",  "female", "mid"),   # user's literal example id (female skirt)
-    (47, "skirt",  "female", "mid"),
-    (55, "dress",  "female", "high"),
-    (61, "blouse", "female", "low"),
-    (73, "heels",  "female", "high"),
-    (88, "handbag","female", "high"),
-]
-MEN = [
-    (11, "shirt",   "male", "low"),
-    (15, "pants",   "male", "mid"),
-    (22, "sneakers","male", "mid"),
-    (33, "jacket",  "male", "high"),
-    (39, "watch",   "male", "high"),
-]
-UNISEX = [
-    (101, "sunglasses", "unisex", "low"),
-    (105, "belt",       "unisex", "low"),
-    (110, "scarf",      "unisex", "low"),
-    (120, "wallet",     "unisex", "mid"),
-]
-ALL_PRODUCTS = WOMEN + MEN + UNISEX
+# Real catalogue IDs (matches Supabase data / frontend).
+PRODUCT_IDS = [11, 15, 22, 33, 39, 42, 44, 47, 55, 61, 73, 88, 101, 105, 110, 120]
 
-PRICE_BUCKETS = ["low", "mid", "high"]
-SEARCH_QUERIES = [
-    "red dress", "summer skirt", "running shoes", "leather bag",
-    "men watch", "office shirt", "heels", "wallet", "jacket", "sunglasses",
-]
-USER_SEGMENTS = ["browser", "buyer", "indecisive", "returner", "new_visitor"]
-DEVICES = ["mobile", "desktop", "tablet"]
+END = "END"
 
 
 # ---------------------------------------------------------------------------
-# Call builders
+# Token builders â€” format is load-bearing, do not change lightly.
+# Only /products and /reviews carry product ids; everything else is a bare
+# path, matching the middleware's history sanitization.
 # ---------------------------------------------------------------------------
-def call_products():
-    return ("GET", "/products", "", "")
+def t_products():
+    return "GET /products"
 
 
-def call_products_id(pid):
-    return ("GET", "/products", f"id={pid}", "")
+def t_product(pid):
+    return f"GET /products?id={pid}"
 
 
-def call_filter_open():
-    return ("GET", "/products/filter", "", "")
+def t_cart_add():
+    return "POST /cart"
 
 
-def call_filter_apply(gender=None, category=None, price=None):
-    body = {}
-    if gender:
-        body["gender"] = gender
-    if category:
-        body["category"] = category
-    if price:
-        body["price"] = price
-    return ("POST", "/products/filter", "", json.dumps(body, separators=(",", ":")))
+def t_cart_view():
+    return "GET /cart"
 
 
-def call_cart(pid):
-    return ("GET", "/cart", f"product_id={pid}", "")
+def t_checkout():
+    return "GET /checkout"
 
 
-def call_reviews(pid):
-    return ("GET", "/reviews", f"product_id={pid}", "")
+def t_payment():
+    return "POST /payment"
 
 
-def call_wishlist_add(pid):
-    return ("POST", "/wishlist", f"product_id={pid}", json.dumps({"product_id": pid}))
+def t_wishlist_add():
+    return "POST /wishlist"
 
 
-def call_search(q):
-    return ("GET", "/search", f"q={q}", "")
+def t_wishlist_view():
+    return "GET /wishlist"
 
 
-def call_category(cat):
-    return ("GET", "/category", f"type={cat}", "")
+def t_reviews(pid):
+    return f"GET /reviews?product_id={pid}"
 
 
-def call_home():
-    return ("GET", "/home", "", "")
+def t_home():
+    return "GET /home"
 
 
-def call_checkout():
-    return ("GET", "/checkout", "", "")
+def t_search():
+    return "GET /search"
 
 
-def call_payment():
-    return ("POST", "/payment", "", json.dumps({"amount": 49.99, "method": "card"}))
+def t_category():
+    return "GET /category"
 
 
-def full_call(method, path, params, body):
-    """Build the single 'api_call' string used as the LSTM token."""
-    if params and body:
-        return f"{method} {path}?{params}  body={body}"
-    if params:
-        return f"{method} {path}?{params}"
-    if body:
-        return f"{method} {path}  body={body}"
-    return f"{method} {path}"
-
-
-def make(method, path, params, body):
-    return {
-        "method": method,
-        "endpoint": path,
-        "params": params,
-        "body": body,
-        "call": full_call(method, path, params, body),
-    }
+def t_filter_apply():
+    return "POST /products/filter"
 
 
 # ---------------------------------------------------------------------------
-# Session templates -- each returns a list of dicts produced by `make(...)`
+# Funnel helpers
 # ---------------------------------------------------------------------------
-def pick_product(matching=None):
-    """Return (id, category, gender, price) optionally matching filter criteria."""
-    pool = ALL_PRODUCTS
-    if matching:
-        pool = [
-            p for p in ALL_PRODUCTS
-            if all(p[i + 1] == v for i, v in enumerate(matching))
-        ]
-        if not pool:
-            pool = ALL_PRODUCTS
-    return random.choice(pool)
+def pick_pid():
+    return random.choice(PRODUCT_IDS)
 
 
-# --- Pattern 1: browse -> product -> cart (70%) or reviews (30%) -----------
-def session_browse_simple():
-    pid, *_ = pick_product()
-    sequence = [make(*call_products())]
-    sequence.append(make(*call_products_id(pid)))
-    if random.random() < 0.70:
-        sequence.append(make(*call_cart(pid)))
-    else:
-        sequence.append(make(*call_reviews(pid)))
-    return sequence
+def funnel_tail(pay_prob=0.95, abandon_prob=0.15):
+    """GET /cart onward. Returns list of tokens ending with payment or leave."""
+    tail = []
+    if random.random() < abandon_prob:
+        tail.append(t_home())  # user leaves via home
+        return tail
+    tail.append(t_checkout())
+    if random.random() < pay_prob:
+        tail.append(t_payment())
+    return tail
 
 
-# --- Pattern 2: filter page open -> filter apply -> product -> cart --------
-def session_filter_to_cart():
-    # User's exact example: gender=female, category=skirt -> id=44 -> cart
-    gender = random.choice(["female", "male", "unisex"])
-    category = random.choice(["skirt", "dress", "shirt", "sneakers", "watch"])
-    price = random.choice(PRICE_BUCKETS + [None, None])  # price is optional
-
-    pid, *_ = pick_product(
-        matching=[gender, category, price] if price else [gender, category]
-    )
-    return [
-        make(*call_filter_open()),
-        make(*call_filter_apply(gender=gender, category=category, price=price)),
-        make(*call_products_id(pid)),
-        make(*call_cart(pid)),
-    ]
+def buy_step(pid):
+    return [t_cart_add(), t_cart_view()]
 
 
-# --- Pattern 3: filter -> product -> reviews --------------------------------
-def session_filter_to_reviews():
-    gender = random.choice(["female", "male"])
-    category = random.choice(["skirt", "dress", "shirt", "sneakers"])
-    pid, *_ = pick_product(matching=[gender, category])
-    return [
-        make(*call_filter_open()),
-        make(*call_filter_apply(gender=gender, category=category)),
-        make(*call_products_id(pid)),
-        make(*call_reviews(pid)),
-    ]
-
-
-# --- Pattern 4: search -> product -> cart -----------------------------------
-def session_search_to_cart():
-    q = random.choice(SEARCH_QUERIES)
-    pid, *_ = pick_product()
-    return [
-        make(*call_search(q)),
-        make(*call_products_id(pid)),
-        make(*call_cart(pid)),
-    ]
-
-
-# --- Pattern 5: search -> product -> reviews --------------------------------
-def session_search_to_reviews():
-    q = random.choice(SEARCH_QUERIES)
-    pid, *_ = pick_product()
-    return [
-        make(*call_search(q)),
-        make(*call_products_id(pid)),
-        make(*call_reviews(pid)),
-    ]
-
-
-# --- Pattern 6: home -> category -> product -> cart -------------------------
-def session_home_to_cart():
-    cat = random.choice(["women", "men", "accessories"])
-    gender = "female" if cat == "women" else "male" if cat == "men" else "unisex"
-    pool = [p for p in ALL_PRODUCTS if p[2] == gender]
-    pid, *_ = random.choice(pool)
-    return [
-        make(*call_home()),
-        make(*call_category(cat)),
-        make(*call_products_id(pid)),
-        make(*call_cart(pid)),
-    ]
-
-
-# --- Pattern 7: browse -> multiple products -> cart -------------------------
-def session_browse_multiple():
-    n_views = random.randint(2, 4)
-    pids = [pick_product()[0] for _ in range(n_views)]
-    sequence = [make(*call_products())]
-    for pid in pids:
-        sequence.append(make(*call_products_id(pid)))
-    final_pid = pids[-1]
-    if random.random() < 0.65:
-        sequence.append(make(*call_cart(final_pid)))
-    else:
-        sequence.append(make(*call_reviews(final_pid)))
-    return sequence
-
-
-# --- Pattern 8: browse -> product -> reviews -> back -> cart ----------------
-def session_reviews_then_cart():
-    pid, *_ = pick_product()
-    return [
-        make(*call_products()),
-        make(*call_products_id(pid)),
-        make(*call_reviews(pid)),
-        make(*call_products_id(pid)),
-        make(*call_cart(pid)),
-    ]
-
-
-# --- Pattern 9: product -> wishlist -> cart ---------------------------------
-def session_wishlist_then_cart():
-    pid, *_ = pick_product()
-    return [
-        make(*call_products()),
-        make(*call_products_id(pid)),
-        make(*call_wishlist_add(pid)),
-        make(*call_cart(pid)),
-    ]
-
-
-# --- Pattern 10: cart -> checkout -> payment (buyer segment) ----------------
-def session_cart_to_payment():
-    pid, *_ = pick_product()
-    return [
-        make(*call_products()),
-        make(*call_products_id(pid)),
-        make(*call_cart(pid)),
-        make(*call_checkout()),
-        make(*call_payment()),
-    ]
-
-
-# --- Pattern 11: cart -> abandonment (browser segment) --------------------
-def session_cart_abandon():
-    pid, *_ = pick_product()
-    return [
-        make(*call_products()),
-        make(*call_products_id(pid)),
-        make(*call_cart(pid)),
-        make(*call_home()),  # user leaves
-    ]
-
-
-# --- Pattern 12: filter returns no results -> re-filter -> product -> cart --
-def session_filter_no_result():
-    gender = random.choice(["female", "male"])
-    bad_category = random.choice(["skirt", "sneakers", "watch"])
-    good_pid, *_ = pick_product(matching=[gender, bad_category])
-    return [
-        make(*call_filter_open()),
-        make(*call_filter_apply(gender=gender, category=bad_category, price="high")),
-        make(*call_products()),  # empty results page
-        make(*call_filter_apply(gender=gender, category=bad_category, price=None)),
-        make(*call_products_id(good_pid)),
-        make(*call_cart(good_pid)),
-    ]
-
-
-# --- Pattern 13: indecisive -- browse many products then cart ---------------
-def session_indecisive():
-    pids = [pick_product()[0] for _ in range(random.randint(3, 6))]
-    seq = [make(*call_products())]
-    for p in pids:
-        seq.append(make(*call_products_id(p)))
-        if random.random() < 0.3:
-            seq.append(make(*call_reviews(p)))
-    seq.append(make(*call_cart(pids[-1])))
+# ---------------------------------------------------------------------------
+# Session patterns â€” weighted toward the logical commerce funnel
+# ---------------------------------------------------------------------------
+def s_buyer_full():
+    """browse -> product -> add to cart -> cart -> checkout -> payment"""
+    pid = pick_pid()
+    seq = [t_products(), t_product(pid)]
+    seq += buy_step(pid)
+    seq += funnel_tail()
     return seq
 
 
-# --- Pattern 14: product -> reviews -> similar product -> cart --------------
-def session_similar_product():
-    pid, cat, *_ = pick_product()
-    same_cat = [p for p in ALL_PRODUCTS if p[1] == cat and p[0] != pid]
-    if not same_cat:
-        same_cat = ALL_PRODUCTS
-    other_pid, *_ = random.choice(same_cat)
-    return [
-        make(*call_products()),
-        make(*call_products_id(pid)),
-        make(*call_reviews(pid)),
-        make(*call_products_id(other_pid)),
-        make(*call_cart(other_pid)),
-    ]
-
-
-# --- Pattern 15: direct deep-link to product (e.g. ad click) ---------------
-def session_direct_product():
-    pid, *_ = pick_product()
-    seq = [make(*call_products_id(pid))]
-    if random.random() < 0.7:
-        seq.append(make(*call_cart(pid)))
-    else:
-        seq.append(make(*call_reviews(pid)))
+def s_buyer_reviews():
+    """browse -> product -> reviews -> add to cart -> ... -> payment"""
+    pid = pick_pid()
+    seq = [t_products(), t_product(pid), t_reviews(pid)]
+    seq += buy_step(pid)
+    seq += funnel_tail()
     return seq
 
 
-# ---------------------------------------------------------------------------
-# Pattern sampler (weighted)
-# ---------------------------------------------------------------------------
+def s_buyer_browses_many():
+    """browse -> few products -> buy last one"""
+    seq = [t_products()]
+    for _ in range(random.randint(2, 3)):
+        seq.append(t_product(pick_pid()))
+    pid = seq[-1].split("id=")[1]
+    seq += buy_step(int(pid))
+    seq += funnel_tail()
+    return seq
+
+
+def s_wishlist_save():
+    """product -> save to wishlist -> view wishlist"""
+    pid = pick_pid()
+    seq = [t_products(), t_product(pid), t_wishlist_add(), t_wishlist_view()]
+    if random.random() < 0.35:  # saved it, comes back and buys it
+        seq += buy_step(pid)
+        seq += funnel_tail()
+    return seq
+
+
+def s_wishlist_then_buy():
+    """product -> save -> (no view) -> buy it anyway"""
+    pid = pick_pid()
+    seq = [t_products(), t_product(pid), t_wishlist_add()]
+    seq += buy_step(pid)
+    seq += funnel_tail()
+    return seq
+
+
+def s_home_funnel():
+    """home -> category -> product -> buy"""
+    seq = [t_home(), t_category()]
+    pid = pick_pid()
+    seq.append(t_product(pid))
+    seq += buy_step(pid)
+    seq += funnel_tail()
+    return seq
+
+
+def s_search_funnel():
+    """search -> product -> buy"""
+    seq = [t_search()]
+    pid = pick_pid()
+    seq.append(t_product(pid))
+    seq += buy_step(pid)
+    seq += funnel_tail()
+    return seq
+
+
+def s_filter_funnel():
+    """products -> apply filter -> product -> buy"""
+    seq = [t_products(), t_filter_apply()]
+    pid = pick_pid()
+    seq.append(t_product(pid))
+    seq += buy_step(pid)
+    seq += funnel_tail()
+    return seq
+
+
+def s_abandon_cart():
+    """gets to the cart then leaves"""
+    pid = pick_pid()
+    return [t_products(), t_product(pid), t_cart_add(), t_cart_view(), t_home()]
+
+
+def s_window_shopper():
+    """products + reviews, never buys"""
+    seq = [t_products()]
+    for _ in range(random.randint(1, 3)):
+        pid = pick_pid()
+        seq.append(t_product(pid))
+        if random.random() < 0.6:
+            seq.append(t_reviews(pid))
+    if random.random() < 0.4:
+        seq.append(t_home())
+    return seq
+
+
+def s_direct_deeplink():
+    """ad click straight into a product, then buys"""
+    pid = pick_pid()
+    seq = [t_product(pid)]
+    seq += buy_step(pid)
+    seq += funnel_tail()
+    return seq
+
+
+def s_cart_rebuy():
+    """back to an existing cart, straight to checkout"""
+    seq = [t_cart_view(), t_checkout()]
+    if random.random() < 0.9:
+        seq.append(t_payment())
+    return seq
+
+
+def s_direct_checkout():
+    """deep-links straight into the checkout tab, then pays"""
+    seq = [t_checkout()]
+    if random.random() < 0.9:
+        seq.append(t_payment())
+    return seq
+
+
 PATTERNS = [
-    (session_browse_simple,       22),  # the user's exact 70/30 cart/reviews case
-    (session_filter_to_cart,      14),  # user's exact filter -> cart example
-    (session_filter_to_reviews,    5),
-    (session_search_to_cart,      10),
-    (session_search_to_reviews,    4),
-    (session_home_to_cart,         8),
-    (session_browse_multiple,      8),
-    (session_reviews_then_cart,    5),
-    (session_wishlist_then_cart,   4),
-    (session_cart_to_payment,      6),
-    (session_cart_abandon,         5),
-    (session_filter_no_result,     3),
-    (session_indecisive,           4),
-    (session_similar_product,      4),
-    (session_direct_product,       8),
+    (s_buyer_full,         26),  # the dominant logical funnel
+    (s_buyer_reviews,      12),
+    (s_buyer_browses_many, 10),
+    (s_wishlist_save,       8),
+    (s_wishlist_then_buy,   6),
+    (s_home_funnel,        10),
+    (s_search_funnel,      10),
+    (s_filter_funnel,       8),
+    (s_abandon_cart,        4),
+    (s_window_shopper,      4),
+    (s_direct_deeplink,     6),
+    (s_cart_rebuy,          4),
+    (s_direct_checkout,     8),
 ]
 
 
@@ -372,62 +257,41 @@ def weighted_choice():
     return PATTERNS[-1][0]
 
 
-# ---------------------------------------------------------------------------
-# Generate dataset
-# ---------------------------------------------------------------------------
-def generate(num_sessions=2000, out_path="synthetic_api_calls.csv"):
+def generate(num_sessions=5000, out_path="synthetic_api_calls.csv"):
     rows = []
     for sid in range(1, num_sessions + 1):
-        segment = random.choice(USER_SEGMENTS)
-        device = random.choice(DEVICES)
-        hour = random.randint(0, 23)
-
-        pattern_fn = weighted_choice()
-        sequence = pattern_fn()
-
-        n = len(sequence)
-        for i, step in enumerate(sequence):
-            if i + 1 < n:
-                nxt = sequence[i + 1]
-                next_call = nxt["call"]
-            else:
-                # Session ends -> predict END token
-                next_call = "END"
+        seq = weighted_choice()()[:8]  # MAX_LEN is 8; keep sessions within it
+        n = len(seq)
+        for i, call in enumerate(seq):
+            nxt = seq[i + 1] if i + 1 < n else END
             rows.append({
-                "session_id":   sid,
-                "step":         i + 1,
-                "current_call": step["call"],
-                "next_call":    next_call,
-                "endpoint":     step["endpoint"],
-                "method":       step["method"],
-                "url_params":   step["params"],
-                "body":         step["body"],
-                "user_segment": segment,
-                "device":       device,
-                "hour":         hour,
+                "session_id": sid,
+                "step": i + 1,
+                "current_call": call,
+                "next_call": nxt,
                 "is_last_step": i + 1 == n,
             })
 
-    fieldnames = [
-        "session_id", "step", "current_call", "next_call",
-        "endpoint", "method", "url_params", "body",
-        "user_segment", "device", "hour", "is_last_step",
-    ]
-    out_file = Path(out_path)
-    with out_file.open("w", newline="", encoding="utf-8") as f:
+    fieldnames = ["session_id", "step", "current_call", "next_call", "is_last_step"]
+    with Path(out_path).open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
     from collections import Counter
-    ep_counter = Counter(r["endpoint"] for r in rows)
-    next_counter = Counter(r["next_call"] for r in rows)
-    print(f"Wrote {len(rows)} rows across {num_sessions} sessions -> {out_file.resolve()}")
-    print(f"Unique current endpoints: {len(ep_counter)}")
-    print(f"Top current endpoints:    {ep_counter.most_common(8)}")
-    print(f"Top next_call tokens:     {next_counter.most_common(10)}")
+    vocab = set(r["current_call"] for r in rows) | set(r["next_call"] for r in rows)
+    after_checkout = Counter(
+        r["next_call"] for r in rows if r["current_call"] == t_checkout()
+    )
+    after_cart = Counter(
+        r["next_call"] for r in rows if r["current_call"] == t_cart_view()
+    )
+    print(f"Wrote {len(rows)} rows across {num_sessions} sessions -> {Path(out_path).resolve()}")
+    print(f"Vocab size: {len(vocab)}")
+    print(f"After {t_checkout()}: {dict(after_checkout.most_common(4))}")
+    print(f"After {t_cart_view()}: {dict(after_cart.most_common(4))}")
     return rows
 
 
 if __name__ == "__main__":
-    generate(num_sessions=2000, out_path="synthetic_api_calls.csv")
+    generate(num_sessions=5000, out_path="synthetic_api_calls.csv")
