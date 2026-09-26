@@ -141,6 +141,35 @@ func (s *Store) FilterProducts(ctx context.Context, opts FilterOptions) ([]Produ
 	return result, nil
 }
 
+// SearchProducts does a free-text ilike search over name and description.
+func (s *Store) SearchProducts(ctx context.Context, query string) ([]Product, error) {
+	if query == "" {
+		return s.ListProducts(ctx)
+	}
+	var result []Product
+	q := url.QueryEscape(query)
+	filter := fmt.Sprintf("select=*&order=id&or=(name.ilike.*%s*,description.ilike.*%s*)", q, q)
+	if err := s.doRequest(ctx, http.MethodGet, "/products", filter, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// ListByCategory filters products whose description mentions category. Real
+// catalogues would have a category_id column; for the demo this is good enough.
+func (s *Store) ListByCategory(ctx context.Context, category string) ([]Product, error) {
+	if category == "" {
+		return s.ListProducts(ctx)
+	}
+	var result []Product
+	q := url.QueryEscape(category)
+	filter := fmt.Sprintf("select=*&order=id&description=ilike.*%s*", q)
+	if err := s.doRequest(ctx, http.MethodGet, "/products", filter, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 // buildFilterQuery assembles a PostgREST query string that pushes filtering,
 // price range, and limit down to Supabase instead of doing them client-side.
 // It is the canonical place to translate FilterOptions into the request URL.

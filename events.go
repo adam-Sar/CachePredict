@@ -197,6 +197,67 @@ func humanLabel(method, path, query, body string) string {
 			}
 		}
 		return "Browse products"
+	case path == "/home":
+		return "Browse home"
+	case path == "/search":
+		vals, _ := url.ParseQuery(query)
+		if q := vals.Get("q"); q != "" {
+			return "Search for " + q
+		}
+		return "Search products"
+	case path == "/category":
+		vals, _ := url.ParseQuery(query)
+		if t := vals.Get("type"); t != "" {
+			return "Browse " + t
+		}
+		return "Browse category"
+	case path == "/reviews":
+		vals, _ := url.ParseQuery(query)
+		if pid := vals.Get("product_id"); pid != "" {
+			if id, err := strconv.ParseInt(pid, 10, 64); err == nil {
+				if name := lookupName(id); name != "" {
+					return "Reviews — " + name
+				}
+			}
+			return "Reviews — product #" + pid
+		}
+		return "View reviews"
+	case path == "/cart":
+		if method == "POST" {
+			var opts struct {
+				ProductID int64 `json:"product_id"`
+			}
+			_ = json.Unmarshal([]byte(body), &opts)
+			if opts.ProductID != 0 {
+				if name := lookupName(opts.ProductID); name != "" {
+					return "Add to cart — " + name
+				}
+			}
+			return "Add to cart"
+		}
+		return "View cart"
+	case path == "/checkout":
+		return "View checkout"
+	case path == "/payment":
+		var opts struct {
+			Amount float64 `json:"amount"`
+		}
+		_ = json.Unmarshal([]byte(body), &opts)
+		return fmt.Sprintf("Pay $%.2f", opts.Amount)
+	case path == "/wishlist":
+		if method == "POST" {
+			var opts struct {
+				ProductID int64 `json:"product_id"`
+			}
+			_ = json.Unmarshal([]byte(body), &opts)
+			if opts.ProductID != 0 {
+				if name := lookupName(opts.ProductID); name != "" {
+					return "Wishlist — " + name
+				}
+			}
+			return "Wishlist add"
+		}
+		return "View wishlist"
 	case path == "/products/filter" && method == "POST":
 		var opts struct {
 			NameSubstr string   `json:"name_substr"`

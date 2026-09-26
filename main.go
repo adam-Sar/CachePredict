@@ -43,6 +43,8 @@ func main() {
 	}
 	defer cache.Close()
 	sessions := NewSessionStore(cfg.SessionMaxHist, cfg.SessionMaxCount)
+	cart := NewCartStore()
+	wishlist := NewWishlistStore()
 
 	registry := NewPrefetchRegistry()
 	registry.Register("GET", "/products", func(ctx context.Context, query string) ([]byte, error) {
@@ -71,6 +73,42 @@ func main() {
 	registry.Register("GET", "/products/filter", func(ctx context.Context, query string) ([]byte, error) {
 		return json.Marshal(map[string]any{"filters": map[string]any{}})
 	})
+	registry.Register("GET", "/home", func(ctx context.Context, query string) ([]byte, error) {
+		return json.Marshal(map[string]any{
+			"hero":    "New season. Cached.",
+			"featured": []any{},
+			"sections": []map[string]string{},
+		})
+	})
+	registry.Register("GET", "/search", func(ctx context.Context, query string) ([]byte, error) {
+		vals, _ := url.ParseQuery(query)
+		return json.Marshal(map[string]any{
+			"query":    vals.Get("q"),
+			"products": []any{},
+			"count":    0,
+		})
+	})
+	registry.Register("GET", "/category", func(ctx context.Context, query string) ([]byte, error) {
+		vals, _ := url.ParseQuery(query)
+		return json.Marshal(map[string]any{
+			"category": vals.Get("type"),
+			"products": []any{},
+			"count":    0,
+		})
+	})
+	registry.Register("GET", "/reviews", func(ctx context.Context, query string) ([]byte, error) {
+		vals, _ := url.ParseQuery(query)
+		return json.Marshal(map[string]any{
+			"product_id":      vals.Get("product_id"),
+			"average_rating":  4.6,
+			"review_count":    0,
+			"reviews":         []any{},
+			"would_recommend": 0.92,
+		})
+	})
+	registry.Register("GET", "/cart", func(ctx context.Context, query string) ([]byte, error) {
+		return json.Marshal(map[string]any{"items": []any{}, "total": 0, "count": 0})
+	})
 
 	e := echo.New()
 	e.GET("/api/activity", RecentHandler)
@@ -78,6 +116,16 @@ func main() {
 	e.GET("/products", ListProductsHandler(store, cfg.ImageBaseURL))
 	e.GET("/products/filter", FilterProductsPageHandler())
 	e.POST("/products/filter", FilterProductsHandler(store, cfg.ImageBaseURL))
+	e.GET("/home", HomeHandler(store, cfg.ImageBaseURL))
+	e.GET("/search", SearchHandler(store, cfg.ImageBaseURL))
+	e.GET("/category", CategoryHandler(store, cfg.ImageBaseURL))
+	e.GET("/reviews", ReviewsHandler)
+	e.GET("/cart", GetCartHandler(cart, store, cfg.ImageBaseURL))
+	e.POST("/cart", AddToCartHandler(cart))
+	e.GET("/checkout", CheckoutHandler(cart, store, cfg.ImageBaseURL))
+	e.POST("/payment", PaymentHandler(cart))
+	e.GET("/wishlist", GetWishlistHandler(wishlist, store, cfg.ImageBaseURL))
+	e.POST("/wishlist", AddWishlistItem(wishlist))
 	e.GET("/healthz", HealthHandler)
 
 	// Run the server in a goroutine so we can intercept shutdown signals
