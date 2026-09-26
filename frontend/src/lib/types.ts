@@ -48,3 +48,67 @@ export interface ProductListResponse {
 export interface ProductDetailResponse {
   product: Product;
 }
+
+export interface SearchResponse {
+  query: string;
+  products: Product[];
+  count: number;
+}
+
+export interface CategoryResponse {
+  category: string;
+  products: Product[];
+  count: number;
+}
+
+export interface HomeResponse {
+  hero: string;
+  featured: Product[];
+  sections: { id: string; title: string }[];
+}
+
+export interface HomeSection {
+  id: string;
+  title: string;
+}
+
+export interface CartItem {
+  product_id: number;
+  name: string;
+  price: number;
+  image_url: string;
+  quantity: number;
+}
+
+export interface CartResponse {
+  items: CartItem[];
+  total: number;
+  count: number;
+}
+
+export interface CheckoutLine {
+  name: string;
+  price: number;
+  quantity: number;
+  subtotal: number;
+}
+
+export interface CheckoutResponse {
+  lines: CheckoutLine[];
+  subtotal: number;
+  shipping: number;
+  total: number;
+  currency: string;
+}
+
+export interface PaymentResponse {
+  status: string;
+  order_id: string;
+  amount: number;
+  method: string;
+}
+
+export interface WishlistResponse {
+  items: { product_id: number; name: string; price: number; image_url: string }[];
+  count: number;
+}
