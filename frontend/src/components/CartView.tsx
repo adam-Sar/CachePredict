@@ -13,24 +13,38 @@ interface CartViewProps {
 export function CartView({ navigate, refreshKey }: CartViewProps) {
   const [data, setData] = useState<CartResponse | null>(null);
   const [status, setStatus] = useState<"HIT" | "MISS" | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
 
   useEffect(() => {
-    getCart().then((r) => {
-      setData(r.data);
-      setStatus(r.status);
-    });
+    setError(null);
+    getCart()
+      .then((r) => {
+        setData(r.data);
+        setStatus(r.status);
+      })
+      .catch((e) => setError(String(e?.message ?? e)));
   }, [refreshKey]);
 
   async function bump(id: number) {
     setAdding(true);
-    await addToCart(id, 1);
-    const r = await getCart();
-    setData(r.data);
-    setStatus(r.status);
-    setAdding(false);
+    try {
+      await addToCart(id, 1);
+      const r = await getCart();
+      setData(r.data);
+      setStatus(r.status);
+    } finally {
+      setAdding(false);
+    }
   }
 
+  if (error) {
+    return (
+      <div className="border border-rust/40 bg-rust/5 p-5 font-mono text-[12px] text-rustdim">
+        Cart error: {error}
+      </div>
+    );
+  }
   if (!data) {
     return <div className="font-display-italic text-taupe">Reading cart…</div>;
   }

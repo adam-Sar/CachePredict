@@ -25,13 +25,13 @@ export function useEventStream(onPrefetch?: (e: PrefetchEvent) => void): {
   const [items, setItems] = useState<ActivityItem[]>([]);
   const [requests, setRequests] = useState<RequestEvent[]>([]);
   const seq = useRef(0);
-  const seenIds = useRef<Set<number>>(new Set());
+  const seenSeq = useRef<Set<number>>(new Set());
   const prefetchRef = useRef(onPrefetch);
   prefetchRef.current = onPrefetch;
 
   useEffect(() => {
     let alive = true;
-    const seen = seenIds.current;
+    const seen = seenSeq.current;
 
     async function poll() {
       try {
@@ -48,21 +48,19 @@ export function useEventStream(onPrefetch?: (e: PrefetchEvent) => void): {
         const newItems: ActivityItem[] = [];
 
         for (const ev of data.events) {
+          if (typeof ev.seq !== "number") continue;
+          if (seen.has(ev.seq)) continue;
+          seen.add(ev.seq);
+          seq.current += 1;
+          const localId = seq.current;
+
           if (ev.type === "request") {
-            const r = ev;
-            const id = hashId(r);
-            if (seen.has(id)) continue;
-            seen.add(id);
-            seq.current += 1;
+            const r = ev as RequestEvent;
             newRequests.push(r);
-            newItems.push({ id: seq.current, ts: nowApprox(ev), kind: "request", request: r });
+            newItems.push({ id: localId, ts: Date.now(), kind: "request", request: r });
           } else if (ev.type === "prefetch") {
-            const p = ev;
-            const id = hashId(p);
-            if (seen.has(id)) continue;
-            seen.add(id);
-            seq.current += 1;
-            newItems.push({ id: seq.current, ts: nowApprox(p), kind: "prefetch", prefetch: p });
+            const p = ev as PrefetchEvent;
+            newItems.push({ id: localId, ts: Date.now(), kind: "prefetch", prefetch: p });
             prefetchRef.current?.(p);
           }
         }
@@ -85,25 +83,4 @@ export function useEventStream(onPrefetch?: (e: PrefetchEvent) => void): {
   }, []);
 
   return { connected, items, requests };
-}
-
-function hashId(e: LiveEvent): number {
-  if (e.type === "request") {
-    return hash(`${e.method}|${e.path}|${e.cache_status ?? ""}|${e.bytes ?? 0}`);
-  }
-  return hash(
-    e.predictions
-      .map((p) => `${p.call}:${p.stored ? 1 : 0}`)
-      .join(",")
-  );
-}
-
-function hash(s: string): number {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
-  return h;
-}
-
-function nowApprox(_e: LiveEvent): number {
-  return Date.now();
 }

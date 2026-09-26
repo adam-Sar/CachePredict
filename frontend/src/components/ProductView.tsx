@@ -14,15 +14,27 @@ interface ProductViewProps {
 export function ProductView({ productId, navigate, bumpCart }: ProductViewProps) {
   const [data, setData] = useState<ProductDetailResponse | null>(null);
   const [status, setStatus] = useState<"HIT" | "MISS" | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    getProduct(productId).then((r) => {
-      setData(r.data);
-      setStatus(r.status);
-    });
+    if (!productId) return;
+    setError(null);
+    getProduct(productId)
+      .then((r) => {
+        setData(r.data);
+        setStatus(r.status);
+      })
+      .catch((e) => setError(String(e?.message ?? e)));
   }, [productId]);
 
+  if (error) {
+    return (
+      <div className="border border-rust/40 bg-rust/5 p-5 font-mono text-[12px] text-rustdim">
+        Product error: {error}
+      </div>
+    );
+  }
   if (!data) {
     return <div className="font-display-italic text-taupe">Loading product…</div>;
   }
@@ -33,16 +45,28 @@ export function ProductView({ productId, navigate, bumpCart }: ProductViewProps)
 
   async function buy() {
     setBusy(true);
-    await addToCart(p.id, 1);
-    bumpCart();
-    setBusy(false);
-    navigate(goCart);
+    setError(null);
+    try {
+      await addToCart(p.id, 1);
+      bumpCart();
+      navigate(goCart);
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function save() {
     setBusy(true);
-    await addToWishlist(p.id);
-    setBusy(false);
+    setError(null);
+    try {
+      await addToWishlist(p.id);
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (

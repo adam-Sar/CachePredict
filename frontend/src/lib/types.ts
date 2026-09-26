@@ -1,4 +1,5 @@
 export interface RequestEvent {
+  seq?: number;
   type: "request";
   sid: string;
   method?: string;
@@ -23,6 +24,7 @@ export interface PrefetchPrediction {
 }
 
 export interface PrefetchEvent {
+  seq?: number;
   type: "prefetch";
   sid: string;
   history?: string[];

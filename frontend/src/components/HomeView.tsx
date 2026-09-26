@@ -13,14 +13,25 @@ interface HomeViewProps {
 export function HomeView({ navigate }: HomeViewProps) {
   const [data, setData] = useState<HomeResponse | null>(null);
   const [status, setStatus] = useState<"HIT" | "MISS" | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    getHome().then((r) => {
-      setData(r.data);
-      setStatus(r.status);
-    });
+    setError(null);
+    getHome()
+      .then((r) => {
+        setData(r.data);
+        setStatus(r.status);
+      })
+      .catch((e) => setError(String(e?.message ?? e)));
   }, []);
 
+  if (error) {
+    return (
+      <div className="border border-rust/40 bg-rust/5 p-5 font-mono text-[12px] text-rustdim">
+        Home error: {error}
+      </div>
+    );
+  }
   if (!data) {
     return <div className="font-display-italic text-taupe">Loading home…</div>;
   }

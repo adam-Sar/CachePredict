@@ -15,6 +15,7 @@ import (
 // Resource carry human-readable strings for the frontend — the raw method/path
 // are kept for debugging but never rendered to end users.
 type Event struct {
+	Seq         int64             `json:"seq"`
 	Type        string            `json:"type"`
 	SID         string            `json:"sid"`
 	Method      string            `json:"method,omitempty"`
@@ -50,6 +51,7 @@ var (
 	nameMu    sync.RWMutex
 	nameCache = map[int64]string{}
 	nameOrder []int64
+	eventSeq  int64
 )
 
 func SubscribeEvents() chan Event {
@@ -69,6 +71,8 @@ func UnsubscribeEvents(ch chan Event) {
 
 func publishEvent(e Event) {
 	eventMu.Lock()
+	eventSeq++
+	e.Seq = eventSeq
 	eventLog = append(eventLog, e)
 	if len(eventLog) > eventLogCap {
 		eventLog = eventLog[len(eventLog)-eventLogCap:]

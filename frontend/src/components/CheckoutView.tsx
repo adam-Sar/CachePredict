@@ -13,22 +13,40 @@ export function CheckoutView({ navigate }: CheckoutViewProps) {
   const [data, setData] = useState<CheckoutResponse | null>(null);
   const [status, setStatus] = useState<"HIT" | "MISS" | null>(null);
   const [confirmed, setConfirmed] = useState<PaymentResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [method, setMethod] = useState("card");
   const [paying, setPaying] = useState(false);
 
   useEffect(() => {
-    getCheckout().then((r) => {
-      setData(r.data);
-      setStatus(r.status);
-    });
+    setError(null);
+    getCheckout()
+      .then((r) => {
+        setData(r.data);
+        setStatus(r.status);
+      })
+      .catch((e) => setError(String(e?.message ?? e)));
   }, []);
 
   async function pay() {
     if (!data) return;
     setPaying(true);
-    const r = await submitPayment(data.total, method);
-    setConfirmed(r.data);
-    setPaying(false);
+    setError(null);
+    try {
+      const r = await submitPayment(data.total, method);
+      setConfirmed(r.data);
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+    } finally {
+      setPaying(false);
+    }
+  }
+
+  if (error) {
+    return (
+      <div className="border border-rust/40 bg-rust/5 p-5 font-mono text-[12px] text-rustdim">
+        Checkout error: {error}
+      </div>
+    );
   }
 
   if (confirmed) {

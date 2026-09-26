@@ -12,12 +12,15 @@ interface WishlistViewProps {
 export function WishlistView({ navigate }: WishlistViewProps) {
   const [data, setData] = useState<WishlistResponse | null>(null);
   const [status, setStatus] = useState<"HIT" | "MISS" | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    getWishlist().then((r) => {
-      setData(r.data);
-      setStatus(r.status);
-    });
+    getWishlist()
+      .then((r) => {
+        setData(r.data);
+        setStatus(r.status);
+      })
+      .catch((e) => setError(String(e?.message ?? e)));
   }, []);
 
   async function remove(id: number) {
@@ -31,6 +34,13 @@ export function WishlistView({ navigate }: WishlistViewProps) {
     setStatus(r.status);
   }
 
+  if (error) {
+    return (
+      <div className="border border-rust/40 bg-rust/5 p-5 font-mono text-[12px] text-rustdim">
+        Wishlist error: {error}
+      </div>
+    );
+  }
   if (!data) {
     return <div className="font-display-italic text-taupe">Reading wishlist…</div>;
   }

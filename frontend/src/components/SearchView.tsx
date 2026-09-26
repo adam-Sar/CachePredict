@@ -13,19 +13,30 @@ interface SearchViewProps {
 export function SearchView({ query, navigate }: SearchViewProps) {
   const [data, setData] = useState<SearchResponse | null>(null);
   const [status, setStatus] = useState<"HIT" | "MISS" | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!query) return;
-    searchProducts(query).then((r) => {
-      setData(r.data);
-      setStatus(r.status);
-    });
+    setError(null);
+    searchProducts(query)
+      .then((r) => {
+        setData(r.data);
+        setStatus(r.status);
+      })
+      .catch((e) => setError(String(e?.message ?? e)));
   }, [query]);
 
   if (!query) {
     return (
       <div className="border border-dashed border-rule p-12 text-center text-taupe font-display-italic text-[18px]">
         Type a query in the bar above to search.
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div className="border border-rust/40 bg-rust/5 p-5 font-mono text-[12px] text-rustdim">
+        Search error: {error}
       </div>
     );
   }
