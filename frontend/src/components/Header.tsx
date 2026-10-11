@@ -49,10 +49,10 @@ function Cell({
     accent === "ok"
       ? "text-ink"
       : accent === "warn"
-      ? "text-amber"
-      : accent === "rust"
-      ? "text-rust"
-      : "text-ink";
+        ? "text-amber"
+        : accent === "rust"
+          ? "text-rust"
+          : "text-ink";
   return (
     <div className="flex flex-col items-end leading-tight">
       <span className="text-[10px] uppercase tracking-[0.16em] text-taupe">{label}</span>

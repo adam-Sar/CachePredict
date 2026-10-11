@@ -18,9 +18,8 @@ export function SectionHead({ kicker, title, meta, accent, action }: SectionHead
       <div className="flex items-center gap-4 shrink-0">
         {meta && (
           <div
-            className={`font-mono text-[11px] uppercase tracking-[0.16em] ${
-              accent === "rust" ? "text-rust" : "text-inkmute"
-            }`}
+            className={`font-mono text-[11px] uppercase tracking-[0.16em] ${accent === "rust" ? "text-rust" : "text-inkmute"
+              }`}
           >
             {meta}
           </div>

@@ -21,9 +21,8 @@ export function TopNav({ current, navigate, onSearch }: TopNavProps) {
             <button
               key={view}
               onClick={() => navigate(target)}
-              className={`font-mono text-[11px] uppercase tracking-[0.18em] transition-colors ${
-                active ? "text-rust" : "text-inkmute hover:text-ink"
-              }`}
+              className={`font-mono text-[11px] uppercase tracking-[0.18em] transition-colors ${active ? "text-rust" : "text-inkmute hover:text-ink"
+                }`}
             >
               {viewLabel(target)}
             </button>

@@ -45,4 +45,10 @@ export default {
     },
   },
   plugins: [],
+} satisfies Config;w": "0 0 25px rgba(139, 92, 246, 0.25)",
+"hit-glow": "0 0 25px rgba(16, 185, 129, 0.3)",
+      },
+    },
+  },
+plugins: [],
 } satisfies Config;

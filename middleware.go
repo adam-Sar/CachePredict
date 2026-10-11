@@ -157,6 +157,7 @@ func PrefetchMiddleware(
 			if key == "" {
 				return next(c) // unparseable query — skip caching, still serve
 			}
+			invalidateStaleViews(cache, c.Request().Method, c.Request().URL.Path)
 			log.Printf("[mw] sid=%s %s %s key=%s", sid[:8], c.Request().Method, c.Request().URL.RequestURI(), key[:12])
 			label := humanLabel(c.Request().Method, c.Request().URL.Path, c.Request().URL.RawQuery, body)
 
@@ -260,6 +261,27 @@ func writeCached(c *echo.Context, resp *cachedResponse) error {
 // cache replay (adding to cart/wishlist changes server state).
 func isMutatingPost(method, path string) bool {
 	return method == http.MethodPost && (path == "/cart" || path == "/wishlist")
+}
+
+// invalidateStaleViews drops session-view caches a mutating POST makes stale,
+// so the next view fetch re-hydrates instead of replaying old contents.
+func invalidateStaleViews(cache *ristretto.Cache, method, path string) {
+	var views []string
+	switch {
+	case method == http.MethodPost && path == "/cart":
+		views = []string{"/cart", "/checkout"}
+	case method == http.MethodPost && path == "/wishlist":
+		views = []string{"/wishlist"}
+	case method == http.MethodPost && path == "/payment":
+		views = []string{"/cart", "/checkout"}
+	default:
+		return
+	}
+	for _, v := range views {
+		if k := CacheKey(http.MethodGet, v, "", ""); k != "" {
+			cache.Del(k)
+		}
+	}
 }
 
 // historyToken formats a request as a predictor-vocabulary token:
