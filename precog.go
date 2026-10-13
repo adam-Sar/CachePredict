@@ -46,6 +46,7 @@ type Engine struct {
 	predictor  Predictor
 	prefetcher *Prefetcher
 	telemetry  *Telemetry
+	inflight   *InflightGroup
 }
 
 // New initializes the Precog SDK with the given configuration.
@@ -76,12 +77,14 @@ func New(cfg Config) (*Engine, error) {
 	}
 
 	telemetry := NewTelemetry()
+	inflight := NewInflightGroup()
 
 	engine := &Engine{
 		config:    cfg,
 		store:     store,
 		predictor: predictor,
 		telemetry: telemetry,
+		inflight:  inflight,
 	}
 
 	return engine, nil
@@ -94,6 +97,7 @@ func (e *Engine) Handler(rootHandler http.Handler) http.Handler {
 		e.prefetcher = NewPrefetcher(
 			rootHandler,
 			e.store,
+			e.inflight,
 			e.config.TTL,
 			e.config.ConfidenceThreshold,
 			e.config.Workers,

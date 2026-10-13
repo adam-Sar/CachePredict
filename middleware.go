@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"time"
 )
@@ -94,32 +95,56 @@ func (e *Engine) Middleware(next http.Handler) http.Handler {
 			}
 		}
 
-		// 2. Cache Miss: Execute handler and record response
+		// 2. Cache Miss: Coalesce in-flight requests to stop duplicate DB calls
 		e.telemetry.RecordMiss()
-		rec := &responseRecorder{
-			ResponseWriter: w,
-			buf:            &bytes.Buffer{},
-			status:         http.StatusOK,
-		}
-		w.Header().Set("X-Cache", "MISS")
 
-		next.ServeHTTP(rec, r)
+		if isSafe && cacheKey != "" && e.inflight != nil {
+			entry, err := e.inflight.Do(cacheKey, func() (*ResponseEntry, error) {
+				// Double-check cache in case prefetcher committed while we waited
+				if cached, found := e.store.Get(cacheKey); found {
+					return cached, nil
+				}
 
-		// Store successful GET/HEAD responses in cache with pre-cooked wire representation
-		if isSafe && rec.status == http.StatusOK && cacheKey != "" {
-			respBody := rec.buf.Bytes()
-			contentType := rec.Header().Get("Content-Type")
-			entry := &ResponseEntry{
-				Body:        respBody,
-				ContentType: contentType,
-				StatusCode:  rec.status,
-				CreatedAt:   time.Now(),
-				WireBytes:   PreCookWireResponse(rec.status, contentType, respBody),
+				rec := &responseRecorder{
+					ResponseWriter: httptest.NewRecorder(),
+					buf:            &bytes.Buffer{},
+					status:         http.StatusOK,
+				}
+				next.ServeHTTP(rec, r)
+
+				if rec.status == http.StatusOK {
+					respBody := rec.buf.Bytes()
+					contentType := rec.Header().Get("Content-Type")
+					ent := &ResponseEntry{
+						Body:        respBody,
+						ContentType: contentType,
+						StatusCode:  rec.status,
+						CreatedAt:   time.Now(),
+						WireBytes:   PreCookWireResponse(rec.status, contentType, respBody),
+					}
+					e.store.Set(cacheKey, ent, e.config.TTL)
+					return ent, nil
+				}
+				return nil, nil
+			})
+
+			if err == nil && entry != nil {
+				if entry.ContentType != "" {
+					w.Header().Set("Content-Type", entry.ContentType)
+				}
+				w.Header().Set("X-Cache", "MISS")
+				w.WriteHeader(entry.StatusCode)
+				_, _ = w.Write(entry.Body)
+
+				e.predictor.Record(sid, method, r.URL.Path, r.URL.RawQuery)
+				e.triggerPrefetch(sid, r, w)
+				return
 			}
-			e.store.Set(cacheKey, entry, e.config.TTL)
 		}
 
-		// Update predictor and trigger background prefetch
+		// Fallback for non-GET or un-coalesced requests
+		w.Header().Set("X-Cache", "MISS")
+		next.ServeHTTP(w, r)
 		e.predictor.Record(sid, method, r.URL.Path, r.URL.RawQuery)
 		if isSafe {
 			e.triggerPrefetch(sid, r, w)

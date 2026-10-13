@@ -21,6 +21,7 @@ type PrefetchJob struct {
 type Prefetcher struct {
 	handler    http.Handler
 	store      Store
+	inflight   *InflightGroup
 	ttl        time.Duration
 	threshold  float64
 	jobChan    chan PrefetchJob
@@ -32,7 +33,7 @@ type Prefetcher struct {
 }
 
 // NewPrefetcher initializes a worker pool for speculative cache warming.
-func NewPrefetcher(handler http.Handler, store Store, ttl time.Duration, threshold float64, workers int) *Prefetcher {
+func NewPrefetcher(handler http.Handler, store Store, inflight *InflightGroup, ttl time.Duration, threshold float64, workers int) *Prefetcher {
 	if workers <= 0 {
 		workers = 4
 	}
@@ -40,6 +41,7 @@ func NewPrefetcher(handler http.Handler, store Store, ttl time.Duration, thresho
 	p := &Prefetcher{
 		handler:   handler,
 		store:     store,
+		inflight:  inflight,
 		ttl:       ttl,
 		threshold: threshold,
 		jobChan:   make(chan PrefetchJob, 256),
@@ -136,43 +138,57 @@ func (p *Prefetcher) execute(job PrefetchJob) {
 		return
 	}
 
-	// Build in-process synthetic request
-	reqCtx, reqCancel := context.WithTimeout(p.ctx, 3*time.Second)
-	defer reqCancel()
+	execFn := func() (*ResponseEntry, error) {
+		// Double-check cache inside singleflight
+		if cached, exists := p.store.Get(cacheKey); exists {
+			return cached, nil
+		}
 
-	syntheticReq := httptest.NewRequest(method, targetURI, nil).WithContext(reqCtx)
-	// Propagate session auth headers
-	for k, v := range job.AuthHeaders {
-		syntheticReq.Header[k] = v
-	}
-	for _, c := range job.Cookies {
-		syntheticReq.AddCookie(c)
-	}
-	// Mark request as speculative so internal middlewares know it is prefetch
-	syntheticReq.Header.Set("X-Precog-Speculative", "true")
+		// Build in-process synthetic request
+		reqCtx, reqCancel := context.WithTimeout(p.ctx, 3*time.Second)
+		defer reqCancel()
 
-	// Execute through application handler with recorder
-	rec := httptest.NewRecorder()
-	func() {
-		defer func() {
-			_ = recover() // Catch any handler panics during speculative run
+		syntheticReq := httptest.NewRequest(method, targetURI, nil).WithContext(reqCtx)
+		for k, v := range job.AuthHeaders {
+			syntheticReq.Header[k] = v
+		}
+		for _, c := range job.Cookies {
+			syntheticReq.AddCookie(c)
+		}
+		syntheticReq.Header.Set("X-Precog-Speculative", "true")
+
+		// Execute through application handler with recorder
+		rec := httptest.NewRecorder()
+		func() {
+			defer func() {
+				_ = recover()
+			}()
+			p.handler.ServeHTTP(rec, syntheticReq)
 		}()
-		p.handler.ServeHTTP(rec, syntheticReq)
-	}()
 
-	// If successful 200 OK, commit to cache
-	if rec.Code == http.StatusOK {
-		body := rec.Body.Bytes()
-		entry := &ResponseEntry{
-			Body:        body,
-			ContentType: rec.Header().Get("Content-Type"),
-			StatusCode:  rec.Code,
-			CreatedAt:   time.Now(),
+		if rec.Code == http.StatusOK {
+			body := rec.Body.Bytes()
+			contentType := rec.Header().Get("Content-Type")
+			entry := &ResponseEntry{
+				Body:        body,
+				ContentType: contentType,
+				StatusCode:  rec.Code,
+				CreatedAt:   time.Now(),
+				WireBytes:   PreCookWireResponse(rec.Code, contentType, body),
+			}
+			p.store.Set(cacheKey, entry, p.ttl)
+			if p.onWarmed != nil {
+				p.onWarmed(job, cacheKey, len(body))
+			}
+			return entry, nil
 		}
-		p.store.Set(cacheKey, entry, p.ttl)
-		if p.onWarmed != nil {
-			p.onWarmed(job, cacheKey, len(body))
-		}
+		return nil, nil
+	}
+
+	if p.inflight != nil {
+		_, _ = p.inflight.Do(cacheKey, execFn)
+	} else {
+		_, _ = execFn()
 	}
 }
 
