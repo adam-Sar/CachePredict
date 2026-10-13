@@ -38,6 +38,11 @@ func (r *responseRecorder) Write(b []byte) (int, error) {
 // Middleware returns a standard net/http middleware handler.
 func (e *Engine) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Automatically serve Precog browser SDK assets (/precog/precog.js & /precog/precog.wasm)
+		if ServeClientAssets(w, r) {
+			return
+		}
+
 		// Ignore prefetch loopback requests to prevent recursion
 		if r.Header.Get("X-Precog-Speculative") != "" {
 			next.ServeHTTP(w, r)
@@ -79,16 +84,12 @@ func (e *Engine) Middleware(next http.Handler) http.Handler {
 
 				// Record navigation in predictor so next predictions continue
 				e.predictor.Record(sid, method, r.URL.Path, r.URL.RawQuery)
-				e.triggerPrefetch(sid, r)
+				e.triggerPrefetch(sid, r, w)
 
-				// Serve from cache
+				// Serve with pre-cooked zero-copy streaming
 				w.Header().Set("X-Cache", "HIT")
 				w.Header().Set("X-Precog", "ram-cache")
-				if entry.ContentType != "" {
-					w.Header().Set("Content-Type", entry.ContentType)
-				}
-				w.WriteHeader(entry.StatusCode)
-				_, _ = w.Write(entry.Body)
+				_, _ = entry.WriteResponse(w)
 				return
 			}
 		}
@@ -104,14 +105,16 @@ func (e *Engine) Middleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(rec, r)
 
-		// Store successful GET/HEAD responses in cache
+		// Store successful GET/HEAD responses in cache with pre-cooked wire representation
 		if isSafe && rec.status == http.StatusOK && cacheKey != "" {
 			respBody := rec.buf.Bytes()
+			contentType := rec.Header().Get("Content-Type")
 			entry := &ResponseEntry{
 				Body:        respBody,
-				ContentType: rec.Header().Get("Content-Type"),
+				ContentType: contentType,
 				StatusCode:  rec.status,
 				CreatedAt:   time.Now(),
+				WireBytes:   PreCookWireResponse(rec.status, contentType, respBody),
 			}
 			e.store.Set(cacheKey, entry, e.config.TTL)
 		}
@@ -119,17 +122,26 @@ func (e *Engine) Middleware(next http.Handler) http.Handler {
 		// Update predictor and trigger background prefetch
 		e.predictor.Record(sid, method, r.URL.Path, r.URL.RawQuery)
 		if isSafe {
-			e.triggerPrefetch(sid, r)
+			e.triggerPrefetch(sid, r, w)
 		}
 	})
 }
 
-func (e *Engine) triggerPrefetch(sid string, r *http.Request) {
-	if e.prefetcher == nil {
+func (e *Engine) triggerPrefetch(sid string, r *http.Request, w http.ResponseWriter) {
+	preds := e.predictor.Predict(sid, 3)
+	if len(preds) == 0 {
 		return
 	}
-	preds := e.predictor.Predict(sid, 3)
-	if len(preds) > 0 {
+
+	// Attach W3C Speculation Rules prefetch link headers to response
+	if w != nil {
+		if linkHeader := BuildSpeculationRulesHeader(preds); linkHeader != "" {
+			w.Header().Add("Link", linkHeader)
+		}
+	}
+
+	// Trigger server-side background speculative fetch
+	if e.prefetcher != nil {
 		e.prefetcher.Submit(sid, preds, r)
 	}
 }

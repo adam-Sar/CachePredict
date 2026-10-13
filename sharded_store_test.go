@@ -143,8 +143,8 @@ func TestResponseEntryWriteResponse(t *testing.T) {
 	if rec.Code != 200 {
 		t.Errorf("expected code 200, got %d", rec.Code)
 	}
-	if rec.Header().Get("X-Precog-Cache") != "HIT" {
-		t.Errorf("expected X-Precog-Cache: HIT")
+	if rec.Header().Get("X-Cache") != "HIT" {
+		t.Errorf("expected X-Cache: HIT")
 	}
 	if rec.Body.String() != `{"status":"precog_dma"}` {
 		t.Errorf("body mismatch: %s", rec.Body.String())

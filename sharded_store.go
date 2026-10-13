@@ -91,9 +91,8 @@ func PreCookWireResponse(statusCode int, contentType string, body []byte) []byte
 		statusText = "OK"
 	}
 	var buf bytes.Buffer
-	// Approximate header size
-	buf.Grow(128 + len(body))
-	fmt.Fprintf(&buf, "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %d\r\nX-Precog-Cache: HIT\r\nConnection: keep-alive\r\n\r\n",
+	buf.Grow(160 + len(body))
+	fmt.Fprintf(&buf, "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %d\r\nX-Cache: HIT\r\nX-Precog: ram-cache\r\nConnection: keep-alive\r\n\r\n",
 		statusCode, statusText, contentType, len(body))
 	buf.Write(body)
 	return buf.Bytes()
@@ -118,7 +117,8 @@ func (e *ResponseEntry) WriteResponse(w http.ResponseWriter) (int64, error) {
 	if e.ContentType != "" {
 		w.Header().Set("Content-Type", e.ContentType)
 	}
-	w.Header().Set("X-Precog-Cache", "HIT")
+	w.Header().Set("X-Cache", "HIT")
+	w.Header().Set("X-Precog", "ram-cache")
 	w.WriteHeader(e.StatusCode)
 	n, err := w.Write(e.Body)
 	return int64(n), err

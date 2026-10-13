@@ -63,20 +63,16 @@ func New(cfg Config) (*Engine, error) {
 		cfg.Workers = 4
 	}
 
-	// Initialize default store if not provided
+	// Initialize default store if not provided: Two-Tier (L1 atomic + L2 256-shard Zero-GC BigCache)
 	store := cfg.Store
 	if store == nil {
-		var err error
-		store, err = NewRistrettoStore(0)
-		if err != nil {
-			return nil, err
-		}
+		store = NewTieredStore(NewShardedStore(nil))
 	}
 
-	// Initialize default predictor if not provided
+	// Initialize default predictor if not provided: Lock-free Dense Contiguous Matrix
 	predictor := cfg.Predictor
 	if predictor == nil {
-		predictor = NewAdaptiveMarkovPredictor()
+		predictor = NewDenseMatrixPredictor(nil)
 	}
 
 	telemetry := NewTelemetry()
