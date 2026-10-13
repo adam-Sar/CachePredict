@@ -1,222 +1,117 @@
-package main
+package precog
 
 import (
-	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
-	"net/http"
-	"net/url"
-	"strconv"
-	"strings"
+	"sync"
 	"time"
+
+	"github.com/dgraph-io/ristretto"
 )
 
-type Product struct {
-	ID          int64   `json:"id"`
-	Name        string  `json:"name"`
-	ImagePath   string  `json:"image_path"`
-	Price       float64 `json:"price"`
-	Description string  `json:"description"`
+// ResponseEntry represents the HTTP response stored in the cache.
+type ResponseEntry struct {
+	Body        []byte
+	ContentType string
+	StatusCode  int
+	CreatedAt   time.Time
 }
 
-type ProductWithImageURL struct {
-	ID          int64   `json:"id"`
-	Name        string  `json:"name"`
-	ImagePath   string  `json:"image_path"`
-	ImageURL    string  `json:"image_url"`
-	Price       float64 `json:"price"`
-	Description string  `json:"description"`
+// Store defines the cache storage interface for Precog.
+type Store interface {
+	Get(key string) (*ResponseEntry, bool)
+	Set(key string, entry *ResponseEntry, ttl time.Duration) bool
+	Del(key string)
+	Close() error
 }
 
-func (p Product) WithImageURL(base string) ProductWithImageURL {
-	base = strings.TrimRight(base, "/")
-	if !strings.HasPrefix(base, "http://") && !strings.HasPrefix(base, "https://") {
-		base = "https://" + base
+// RistrettoStore is the high-performance in-memory cache implementation using TinyLFU.
+type RistrettoStore struct {
+	cache *ristretto.Cache
+}
+
+// NewRistrettoStore creates a new TinyLFU cache with sane defaults.
+func NewRistrettoStore(maxCost int64) (*RistrettoStore, error) {
+	if maxCost <= 0 {
+		maxCost = 100 * 1024 * 1024 // 100 MB default capacity
 	}
-	return ProductWithImageURL{
-		ID:          p.ID,
-		Name:        p.Name,
-		ImagePath:   p.ImagePath,
-		ImageURL:    base + "/" + p.ImagePath,
-		Price:       p.Price,
-		Description: p.Description,
-	}
-}
-
-type FilterOptions struct {
-	NameSubstr string   `json:"name_substr"`
-	MinPrice   *float64 `json:"min_price,omitempty"`
-	MaxPrice   *float64 `json:"max_price,omitempty"`
-	Limit      int      `json:"limit,omitempty"`
-}
-
-var ErrProductNotFound = errors.New("product not found")
-
-type Store struct {
-	apiBase string
-	apiKey  string
-	http    *http.Client
-}
-
-func NewStore(baseURL, apiKey string) (*Store, error) {
-	if baseURL == "" {
-		return nil, errors.New("baseURL is required")
-	}
-	if apiKey == "" {
-		return nil, errors.New("apiKey is required")
-	}
-	return &Store{
-		apiBase: strings.TrimRight(baseURL, "/") + "/rest/v1",
-		apiKey:  apiKey,
-		http:    &http.Client{Timeout: 10 * time.Second},
-	}, nil
-}
-
-func (s *Store) doRequest(ctx context.Context, method, path, query string, out any) error {
-	u := s.apiBase + path
-	if query != "" {
-		u += "?" + query
-	}
-	req, err := http.NewRequestWithContext(ctx, method, u, nil)
+	c, err := ristretto.NewCache(&ristretto.Config{
+		NumCounters: 1e6,     // 1M counters for tracking access frequency
+		MaxCost:     maxCost, // Max total bytes stored
+		BufferItems: 64,      // 64 keys per Get buffer
+	})
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return nil, err
 	}
-	req.Header.Set("apikey", s.apiKey)
-	req.Header.Set("Authorization", "Bearer "+s.apiKey)
-	req.Header.Set("Content-Type", "application/json")
+	return &RistrettoStore{cache: c}, nil
+}
 
-	resp, err := s.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("http: %w", err)
+func (s *RistrettoStore) Get(key string) (*ResponseEntry, bool) {
+	val, found := s.cache.Get(key)
+	if !found || val == nil {
+		return nil, false
 	}
-	defer resp.Body.Close()
+	entry, ok := val.(*ResponseEntry)
+	return entry, ok
+}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("read body: %w", err)
-	}
+func (s *RistrettoStore) Set(key string, entry *ResponseEntry, ttl time.Duration) bool {
+	cost := int64(len(entry.Body)) + 64
+	return s.cache.SetWithTTL(key, entry, cost, ttl)
+}
 
-	if resp.StatusCode == http.StatusNotFound {
-		return ErrProductNotFound
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("supabase %d %s: %s", resp.StatusCode, http.StatusText(resp.StatusCode), string(body))
-	}
+func (s *RistrettoStore) Del(key string) {
+	s.cache.Del(key)
+}
 
-	if out != nil && len(body) > 0 {
-		if err := json.Unmarshal(body, out); err != nil {
-			return fmt.Errorf("decode: %w", err)
-		}
-	}
+func (s *RistrettoStore) Close() error {
+	s.cache.Close()
 	return nil
 }
 
-func (s *Store) ListProducts(ctx context.Context) ([]Product, error) {
-	var result []Product
-	if err := s.doRequest(ctx, http.MethodGet, "/products", "select=*&order=id", &result); err != nil {
-		return nil, err
-	}
-	return result, nil
+// MemoryStore is a zero-dependency in-memory store suitable for testing.
+type MemoryStore struct {
+	mu    sync.RWMutex
+	items map[string]memItem
 }
 
-func (s *Store) GetProduct(ctx context.Context, id int64) (*Product, error) {
-	var result []Product
-	q := fmt.Sprintf("id=eq.%d&select=*", id)
-	if err := s.doRequest(ctx, http.MethodGet, "/products", q, &result); err != nil {
-		return nil, err
-	}
-	if len(result) == 0 {
-		return nil, ErrProductNotFound
-	}
-	return &result[0], nil
+type memItem struct {
+	entry     *ResponseEntry
+	expiresAt time.Time
 }
 
-// GetProducts fetches many products in a single round-trip using PostgREST's
-// in=() filter. The returned map is keyed by Product.ID so callers can resolve
-// their own ordering. Missing IDs are simply absent from the map.
-func (s *Store) GetProducts(ctx context.Context, ids []int64) (map[int64]Product, error) {
-	if len(ids) == 0 {
-		return map[int64]Product{}, nil
-	}
-	seen := make(map[int64]struct{}, len(ids))
-	parts := make([]string, 0, len(ids))
-	for _, id := range ids {
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
-		parts = append(parts, strconv.FormatInt(id, 10))
-	}
-	q := "id=in.(" + strings.Join(parts, ",") + ")&select=*"
-	var rows []Product
-	if err := s.doRequest(ctx, http.MethodGet, "/products", q, &rows); err != nil {
-		return nil, err
-	}
-	out := make(map[int64]Product, len(rows))
-	for _, p := range rows {
-		out[p.ID] = p
-	}
-	return out, nil
+func NewMemoryStore() *MemoryStore {
+	return &MemoryStore{items: make(map[string]memItem)}
 }
 
-func (s *Store) FilterProducts(ctx context.Context, opts FilterOptions) ([]Product, error) {
-	var result []Product
-	if err := s.doRequest(ctx, http.MethodGet, "/products", buildFilterQuery(opts), &result); err != nil {
-		return nil, err
+func (s *MemoryStore) Get(key string) (*ResponseEntry, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	item, ok := s.items[key]
+	if !ok || (!item.expiresAt.IsZero() && time.Now().After(item.expiresAt)) {
+		return nil, false
 	}
-	return result, nil
+	return item.entry, true
 }
 
-// SearchProducts does a free-text ilike search over name and description.
-func (s *Store) SearchProducts(ctx context.Context, query string) ([]Product, error) {
-	if query == "" {
-		return s.ListProducts(ctx)
+func (s *MemoryStore) Set(key string, entry *ResponseEntry, ttl time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var exp time.Time
+	if ttl > 0 {
+		exp = time.Now().Add(ttl)
 	}
-	var result []Product
-	q := url.QueryEscape(query)
-	filter := fmt.Sprintf("select=*&order=id&or=(name.ilike.*%s*,description.ilike.*%s*)", q, q)
-	if err := s.doRequest(ctx, http.MethodGet, "/products", filter, &result); err != nil {
-		return nil, err
-	}
-	return result, nil
+	s.items[key] = memItem{entry: entry, expiresAt: exp}
+	return true
 }
 
-// ListByCategory filters products whose description mentions category. Real
-// catalogues would have a category_id column; for the demo this is good enough.
-func (s *Store) ListByCategory(ctx context.Context, category string) ([]Product, error) {
-	if category == "" {
-		return s.ListProducts(ctx)
-	}
-	var result []Product
-	q := url.QueryEscape(category)
-	filter := fmt.Sprintf("select=*&order=id&description=ilike.*%s*", q)
-	if err := s.doRequest(ctx, http.MethodGet, "/products", filter, &result); err != nil {
-		return nil, err
-	}
-	return result, nil
+func (s *MemoryStore) Del(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.items, key)
 }
 
-// buildFilterQuery assembles a PostgREST query string that pushes filtering,
-// price range, and limit down to Supabase instead of doing them client-side.
-// It is the canonical place to translate FilterOptions into the request URL.
-func buildFilterQuery(opts FilterOptions) string {
-	var parts []string
-	parts = append(parts, "select=*", "order=id")
-	if opts.NameSubstr != "" {
-		// ilike.*X* is case-insensitive substring match. Escape the user
-		// input so '%', '_', '&', etc. don't break out of the wildcard.
-		parts = append(parts, "name=ilike.*"+url.QueryEscape(opts.NameSubstr)+"*")
-	}
-	if opts.MinPrice != nil {
-		parts = append(parts, "price=gte."+strconv.FormatFloat(*opts.MinPrice, 'f', -1, 64))
-	}
-	if opts.MaxPrice != nil {
-		parts = append(parts, "price=lte."+strconv.FormatFloat(*opts.MaxPrice, 'f', -1, 64))
-	}
-	if opts.Limit > 0 {
-		parts = append(parts, "limit="+strconv.Itoa(opts.Limit))
-	}
-	return strings.Join(parts, "&")
+func (s *MemoryStore) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.items = make(map[string]memItem)
+	return nil
 }

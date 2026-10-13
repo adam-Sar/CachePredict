@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"proj/pkg/precog"
+	"github.com/adam-Sar/precog"
 )
 
 func TestPrecogBasicCaching(t *testing.T) {

@@ -1,6 +1,6 @@
-module proj
+module github.com/adam-Sar/precog
 
-go 1.26.5
+go 1.24
 
 require (
 	github.com/dgraph-io/ristretto v0.2.0

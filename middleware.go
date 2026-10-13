@@ -1,40 +1,33 @@
-package main
+package precog
 
 import (
 	"bytes"
-	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"io"
-	"log"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
-
-	"github.com/dgraph-io/ristretto"
-	"github.com/labstack/echo/v5"
 )
 
-// recorder tees response writes into a buffer for capture while forwarding
-// headers and WriteHeader to the underlying writer. It captures the status
-// code and content type so cached entries can be replayed faithfully.
-type recorder struct {
+// responseRecorder captures the status code, headers, and body of the downstream handler.
+type responseRecorder struct {
 	http.ResponseWriter
 	buf         *bytes.Buffer
 	status      int
 	wroteHeader bool
 }
 
-func (r *recorder) WriteHeader(s int) {
+func (r *responseRecorder) WriteHeader(status int) {
 	if !r.wroteHeader {
-		r.status = s
+		r.status = status
 		r.wroteHeader = true
 	}
-	r.ResponseWriter.WriteHeader(s)
+	r.ResponseWriter.WriteHeader(status)
 }
 
-func (r *recorder) Write(b []byte) (int, error) {
+func (r *responseRecorder) Write(b []byte) (int, error) {
 	if !r.wroteHeader {
-		// net/http auto-writes 200 before the first Write; mirror that.
 		r.status = http.StatusOK
 		r.wroteHeader = true
 	}
@@ -42,363 +35,130 @@ func (r *recorder) Write(b []byte) (int, error) {
 	return r.ResponseWriter.Write(b)
 }
 
-// cachedResponse is what the ristretto cache stores. Status and content type
-// must be replayed alongside the body so e.g. a 404 stays a 404 after the
-// underlying handler is bypassed.
-type cachedResponse struct {
-	status      int
-	contentType string
-	body        []byte
-}
+// Middleware returns a standard net/http middleware handler.
+func (e *Engine) Middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Ignore prefetch loopback requests to prevent recursion
+		if r.Header.Get("X-Precog-Speculative") != "" {
+			next.ServeHTTP(w, r)
+			return
+		}
 
-// PrefetchFunc produces the bytes that should be cached for an endpoint.
-// Implementations must return the exact bytes the matching handler would
-// emit so the cache stays consistent across prefetch and real requests.
-// The query argument is the parsed query string from the predicted call
-// (without the leading "?"), or "" when the call had no query. The sid
-// argument lets session-scoped endpoints (cart, wishlist, checkout) hydrate
-// the same data the real request would return.
-type PrefetchFunc func(ctx context.Context, sid, query string) ([]byte, error)
+		// Check if route is explicitly skipped
+		for _, skip := range e.config.SkipRoutes {
+			if strings.HasPrefix(r.URL.Path, skip) {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
 
-// PrefetchRegistry maps "METHOD /path" to a PrefetchFunc. Predicted calls
-// include their query string, but dispatch is method+path only; the query
-// becomes part of the cache key so different predicted inputs still cache
-// separately.
-type PrefetchRegistry struct {
-	funcs map[string]PrefetchFunc
-}
+		// Extract or generate session ID
+		sid := e.extractSession(r)
+		if sid == "" {
+			sid = generateSessionID()
+			e.writeSessionCookie(w, sid)
+		}
 
-func NewPrefetchRegistry() *PrefetchRegistry {
-	return &PrefetchRegistry{funcs: make(map[string]PrefetchFunc)}
-}
+		method := strings.ToUpper(r.Method)
+		isSafe := method == "GET" || method == "HEAD"
 
-func (r *PrefetchRegistry) Register(method, path string, fn PrefetchFunc) {
-	r.funcs[strings.ToUpper(method)+" "+path] = fn
-}
+		// Read body once for non-GET requests (if needed for cache key)
+		var bodyStr string
+		if !isSafe && r.Body != nil {
+			b, _ := io.ReadAll(r.Body)
+			bodyStr = string(b)
+			r.Body = io.NopCloser(bytes.NewReader(b))
+		}
 
-// Lookup resolves a predicted call string ("METHOD /path?query") to its
-// registered PrefetchFunc and the query string that should be folded into
-// the cache key.
-func (r *PrefetchRegistry) Lookup(call string) (PrefetchFunc, string) {
-	method, path, query, ok := splitCall(call)
-	if !ok {
-		return nil, ""
-	}
-	fn, ok := r.funcs[method+" "+path]
-	if !ok {
-		return nil, ""
-	}
-	return fn, query
-}
+		cacheKey := CanonicalCacheKey(method, r.URL.Path, r.URL.RawQuery, bodyStr)
 
-// splitCall parses "METHOD /path?query" into its parts. The method is
-// upper-cased so callers can register and look up without worrying about
-// case. ok is false when the call is malformed (missing method or path).
-func splitCall(call string) (method, path, query string, ok bool) {
-	parts := strings.SplitN(call, " ", 2)
-	if len(parts) != 2 {
-		return "", "", "", false
-	}
-	method = strings.ToUpper(parts[0])
-	rest := parts[1]
-	if idx := strings.Index(rest, "?"); idx >= 0 {
-		path = rest[:idx]
-		query = rest[idx+1:]
-	} else {
-		path = rest
-	}
-	if path == "" {
-		return "", "", "", false
-	}
-	return method, path, query, true
-}
+		// 1. Check Cache for Safe Requests
+		if isSafe && cacheKey != "" {
+			if entry, found := e.store.Get(cacheKey); found {
+				e.telemetry.RecordHit()
 
-// PrefetchMiddleware returns an echo middleware that:
-//   - assigns a session id (via cookie) and appends the call to session history;
-//   - serves cached responses for matching keys (skipping the predictor on hit);
-//   - on miss, runs the handler with a recording writer and stores the bytes;
-//   - asynchronously warms the cache with the predictor's top-K predictions.
-//
-// Pass a nil predictor to disable async prefetch. cookieSecure controls whether
-// the session cookie is marked Secure (set true behind HTTPS).
-func PrefetchMiddleware(
-	p *Predictor,
-	cache *ristretto.Cache,
-	registry *PrefetchRegistry,
-	sessions *SessionStore,
-	ttl time.Duration,
-	cookieSecure bool,
-) echo.MiddlewareFunc {
-		return func(next echo.HandlerFunc) echo.HandlerFunc {
-			return func(c *echo.Context) error {
-				if c.Request().URL.Path == "/api/activity" {
-					return next(c) // bypass caching, logging, prefetch
+				// Record navigation in predictor so next predictions continue
+				e.predictor.Record(sid, method, r.URL.Path, r.URL.RawQuery)
+				e.triggerPrefetch(sid, r)
+
+				// Serve from cache
+				w.Header().Set("X-Cache", "HIT")
+				w.Header().Set("X-Precog", "ram-cache")
+				if entry.ContentType != "" {
+					w.Header().Set("Content-Type", entry.ContentType)
 				}
-				// History tokens must match the predictor vocabulary exactly.
-			sid := sessionIDFromRequest(c)
-			if sid == "" {
-				sid = NewSessionID()
-				writeSessionCookie(c, sid, cookieSecure)
+				w.WriteHeader(entry.StatusCode)
+				_, _ = w.Write(entry.Body)
+				return
 			}
-			sessions.AddCall(sid, historyToken(c.Request().Method, c.Request().URL))
+		}
 
-			// Read body once (for cache key) and restore it for the handler.
-			// GET/HEAD/DELETE/OPTIONS carry no defined body, so skip reading
-			// to keep cache keys stable across clients that erroneously
-			// attach one (Postman, some proxies).
-			var body string
-			if c.Request().Body != nil && !isBodylessMethod(c.Request().Method) {
-				b, _ := io.ReadAll(c.Request().Body)
-				body = string(b)
-				c.Request().Body = io.NopCloser(bytes.NewReader(b))
+		// 2. Cache Miss: Execute handler and record response
+		e.telemetry.RecordMiss()
+		rec := &responseRecorder{
+			ResponseWriter: w,
+			buf:            &bytes.Buffer{},
+			status:         http.StatusOK,
+		}
+		w.Header().Set("X-Cache", "MISS")
+
+		next.ServeHTTP(rec, r)
+
+		// Store successful GET/HEAD responses in cache
+		if isSafe && rec.status == http.StatusOK && cacheKey != "" {
+			respBody := rec.buf.Bytes()
+			entry := &ResponseEntry{
+				Body:        respBody,
+				ContentType: rec.Header().Get("Content-Type"),
+				StatusCode:  rec.status,
+				CreatedAt:   time.Now(),
 			}
+			e.store.Set(cacheKey, entry, e.config.TTL)
+		}
 
-			key := CacheKey(c.Request().Method, c.Request().URL.Path, c.Request().URL.RawQuery, body)
-			if key == "" {
-				return next(c) // unparseable query — skip caching, still serve
-			}
-			invalidateStaleViews(cache, c.Request().Method, c.Request().URL.Path)
-			log.Printf("[mw] sid=%s %s %s key=%s", sid[:8], c.Request().Method, c.Request().URL.RequestURI(), key[:12])
-			label := humanLabel(c.Request().Method, c.Request().URL.Path, c.Request().URL.RawQuery, body)
-
-			if v, found := cache.Get(key); found {
-				if resp, ok := v.(*cachedResponse); ok {
-					log.Printf("[mw] sid=%s HIT key=%s", sid[:8], key[:12])
-					publishEvent(Event{
-						Type:        "request",
-						SID:         sid,
-						Method:      c.Request().Method,
-						Path:        c.Request().URL.RequestURI(),
-						Query:       c.Request().URL.RawQuery,
-						Key:         key,
-						CacheStatus: "HIT",
-						Label:       label,
-						Resource:    extractResourceFromQuery(c.Request().URL.RawQuery),
-					})
-					// Keep prefetching so the next call is already warm.
-					if p != nil && registry != nil {
-						go prefetch(p, cache, registry, sessions, sid, ttl)
-					}
-					return writeCached(c, resp)
-				}
-			}
-
-			rec := &recorder{ResponseWriter: c.Response(), buf: &bytes.Buffer{}}
-			rec.Header().Set("X-Cache", "MISS")
-			c.SetResponse(rec)
-			if err := next(c); err != nil {
-				return err
-			}
-			if rec.wroteHeader {
-				contentType := rec.Header().Get("Content-Type")
-				if contentType == "" {
-					contentType = "application/json"
-				}
-				status := rec.status
-				if status == 0 {
-					status = http.StatusOK
-				}
-				respBody := rec.buf.Bytes()
-				rememberNameFromBody(respBody)
-				if isMutatingPost(c.Request().Method, c.Request().URL.Path) {
-					log.Printf("[mw] sid=%s MISS→no-store key=%s (mutating POST)", sid[:8], key[:12])
-				} else {
-					resp := &cachedResponse{
-						status:      status,
-						contentType: contentType,
-						body:        respBody,
-					}
-					cache.SetWithTTL(key, resp, int64(len(resp.body)), ttl)
-					log.Printf("[mw] sid=%s MISS→cached key=%s status=%d bytes=%d ttl=%s", sid[:8], key[:12], status, len(resp.body), ttl)
-				}
-				resource := extractResourceFromQuery(c.Request().URL.RawQuery)
-				publishEvent(Event{
-					Type:        "request",
-					SID:         sid,
-					Method:      c.Request().Method,
-					Path:        c.Request().URL.RequestURI(),
-					Query:       c.Request().URL.RawQuery,
-					Key:         key,
-					CacheStatus: "MISS",
-					Bytes:       len(respBody),
-					TTLMs:       ttl.Milliseconds(),
-					Label:       label,
-					Resource:    resource,
-				})
-			} else {
-				log.Printf("[mw] sid=%s MISS no-header key=%s", sid[:8], key[:12])
-				publishEvent(Event{
-					Type:        "request",
-					SID:         sid,
-					Method:      c.Request().Method,
-					Path:        c.Request().URL.RequestURI(),
-					Query:       c.Request().URL.RawQuery,
-					Key:         key,
-					CacheStatus: "MISS",
-					Label:       label,
-				})
-			}
-
-			if p != nil && registry != nil {
-				go prefetch(p, cache, registry, sessions, sid, ttl)
-			}
-			return nil
+		// Update predictor and trigger background prefetch
+		e.predictor.Record(sid, method, r.URL.Path, r.URL.RawQuery)
+		if isSafe {
+			e.triggerPrefetch(sid, r)
 		}
-	}
-}
-
-// writeCached replays a cached response (status, content type, body) on the
-// echo context. Used after a cache hit to bypass the handler.
-func writeCached(c *echo.Context, resp *cachedResponse) error {
-	c.Response().Header().Set("Content-Type", resp.contentType)
-	c.Response().Header().Set("X-Cache", "HIT")
-	c.Response().WriteHeader(resp.status)
-	_, err := c.Response().Write(resp.body)
-	return err
-}
-
-// isMutatingPost reports POSTs whose side effect must never be skipped by a
-// cache replay (adding to cart/wishlist changes server state).
-func isMutatingPost(method, path string) bool {
-	return method == http.MethodPost && (path == "/cart" || path == "/wishlist")
-}
-
-// invalidateStaleViews drops session-view caches a mutating POST makes stale,
-// so the next view fetch re-hydrates instead of replaying old contents.
-func invalidateStaleViews(cache *ristretto.Cache, method, path string) {
-	var views []string
-	switch {
-	case method == http.MethodPost && path == "/cart":
-		views = []string{"/cart", "/checkout"}
-	case method == http.MethodPost && path == "/wishlist":
-		views = []string{"/wishlist"}
-	case method == http.MethodPost && path == "/payment":
-		views = []string{"/cart", "/checkout"}
-	default:
-		return
-	}
-	for _, v := range views {
-		if k := CacheKey(http.MethodGet, v, "", ""); k != "" {
-			cache.Del(k)
-		}
-	}
-}
-
-// historyToken formats a request as a predictor-vocabulary token:
-// "METHOD /path", with the query kept only for /products and /reviews.
-func historyToken(method string, u *url.URL) string {
-	if u.RawQuery != "" && (u.Path == "/products" || u.Path == "/reviews") {
-		return method + " " + u.RequestURI()
-	}
-	return method + " " + u.Path
-}
-
-// prefetch runs the predictor on the session history and warms the cache for
-// each prediction that has a registered PrefetchFunc. Anything unregistered or
-// unparseable is silently dropped. Runs as a goroutine; errors only log.
-func prefetch(p *Predictor, cache *ristretto.Cache, registry *PrefetchRegistry, sessions *SessionStore, sid string, ttl time.Duration) {
-	history := sessions.Snapshot(sid)
-	preds, err := p.Predict(history, 3)
-	if err != nil {
-		log.Printf("[pre] sid=%s predictor err=%v history=%v", sid[:8], err, history)
-		return
-	}
-	log.Printf("[pre] sid=%s history=%v predictions=%d", sid[:8], history, len(preds))
-
-	out := make([]EventPrediction, 0, len(preds))
-	for i, pred := range preds {
-		log.Printf("[pre] sid=%s  [%d] p=%.4f call=%q", sid[:8], i, pred.Prob, pred.Call)
-		method, path, query, _ := splitCall(pred.Call)
-		ep := EventPrediction{
-			Call:  pred.Call,
-			Prob:  pred.Prob,
-			Label: humanLabel(method, path, query, ""),
-		}
-		if pred.Call == "" || pred.Call == "END" {
-			ep.Reason = "end"
-			out = append(out, ep)
-			continue
-		}
-		// Mutations can't be cached; warm the view the user lands on instead.
-		if isMutatingPost(method, path) {
-			if path == "/cart" {
-				pred.Call = "GET /cart"
-			} else {
-				pred.Call = "GET /wishlist"
-			}
-			method, path, query, _ = splitCall(pred.Call)
-			ep.Call = pred.Call
-			ep.Label = humanLabel(method, path, query, "")
-		}
-		if method == http.MethodPost && path == "/products/filter" {
-			// Predictor can't know the filter body; a warmed key could never HIT.
-			log.Printf("[pre] sid=%s  [%d] SKIP filter body unknown", sid[:8], i)
-			continue
-		}
-		fn, query := registry.Lookup(pred.Call)
-		if fn == nil {
-			log.Printf("[pre] sid=%s  [%d] SKIP no-registered-handler for %q", sid[:8], i, pred.Call)
-			ep.Reason = "no-handler"
-			out = append(out, ep)
-			continue
-		}
-		body, err := fn(context.Background(), sid, query)
-		if err != nil || len(body) == 0 {
-			log.Printf("[pre] sid=%s  [%d] SKIP fn-err=%v bytes=%d for %q", sid[:8], i, err, len(body), pred.Call)
-			ep.Reason = "fn-error"
-			out = append(out, ep)
-			continue
-		}
-		rememberNameFromBody(body)
-		key := CacheKey(method, path, query, "")
-		if key == "" {
-			log.Printf("[pre] sid=%s  [%d] SKIP empty-key for %q", sid[:8], i, pred.Call)
-			ep.Reason = "empty-key"
-			out = append(out, ep)
-			continue
-		}
-		resp := &cachedResponse{
-			status:      http.StatusOK,
-			contentType: "application/json",
-			body:        body,
-		}
-		cache.SetWithTTL(key, resp, int64(len(body)), ttl)
-		log.Printf("[pre] sid=%s  [%d] STORED key=%s call=%q bytes=%d ttl=%s", sid[:8], i, key[:12], pred.Call, len(body), ttl)
-		ep.Stored = true
-		ep.Bytes = len(body)
-		ep.Resource = extractResourceFromQuery(query)
-		if ep.Resource == "" && path == "/products" && query == "" {
-			ep.Resource = ""
-		}
-		out = append(out, ep)
-	}
-	publishEvent(Event{
-		Type:        "prefetch",
-		SID:         sid,
-		History:     history,
-		Predictions: out,
 	})
 }
 
-// sessionIDFromRequest returns the "session_id" cookie value, or "" if absent.
-func sessionIDFromRequest(c *echo.Context) string {
-	cookie, err := c.Cookie("session_id")
-	if err != nil {
-		return ""
+func (e *Engine) triggerPrefetch(sid string, r *http.Request) {
+	if e.prefetcher == nil {
+		return
 	}
-	return cookie.Value
+	preds := e.predictor.Predict(sid, 3)
+	if len(preds) > 0 {
+		e.prefetcher.Submit(sid, preds, r)
+	}
 }
 
-// writeSessionCookie sets the "session_id" cookie. When secure is true the
-// cookie is only sent over HTTPS.
-func writeSessionCookie(c *echo.Context, id string, secure bool) {
-	c.SetCookie(&http.Cookie{
-		Name:     "session_id",
-		Value:    id,
+func (e *Engine) extractSession(r *http.Request) string {
+	if e.config.SessionExtractor != nil {
+		return e.config.SessionExtractor(r)
+	}
+	// Default: Look in Cookie then X-Session-ID header
+	if cookie, err := r.Cookie(e.config.SessionCookieName); err == nil && cookie.Value != "" {
+		return cookie.Value
+	}
+	return r.Header.Get("X-Session-ID")
+}
+
+func (e *Engine) writeSessionCookie(w http.ResponseWriter, sid string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     e.config.SessionCookieName,
+		Value:    sid,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   secure,
+		Secure:   e.config.CookieSecure,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   86400,
 	})
+}
+
+func generateSessionID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
