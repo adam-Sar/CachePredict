@@ -35,19 +35,24 @@ func NormalizeRoute(method, path string) string {
 	return m + " " + p
 }
 
-// FastHash64 computes a 64-bit non-cryptographic hash in ~10ns using xxHash.
-// Over 100x faster than SHA-256 with zero heap allocations on hot path.
+// FastHash64 computes a 64-bit non-cryptographic hash in nanoseconds using xxHash.
+// Over 100x faster than SHA-256 with zero unnecessary heap allocations.
 func FastHash64(method, path, rawQuery, body string) uint64 {
 	method = strings.ToUpper(method)
-	sortedQuery := SortQuery(rawQuery)
 
 	var sb strings.Builder
+	sb.Grow(len(method) + len(path) + len(rawQuery) + len(body) + 16)
 	sb.WriteString(method)
 	sb.WriteString(" ")
 	sb.WriteString(path)
-	if sortedQuery != "" {
+
+	if rawQuery != "" {
 		sb.WriteString("?")
-		sb.WriteString(sortedQuery)
+		if !strings.ContainsRune(rawQuery, '&') {
+			sb.WriteString(rawQuery)
+		} else {
+			sb.WriteString(SortQuery(rawQuery))
+		}
 	}
 
 	// For GET / HEAD, body is ignored
