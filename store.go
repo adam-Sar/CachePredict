@@ -13,6 +13,7 @@ type ResponseEntry struct {
 	ContentType string
 	StatusCode  int
 	CreatedAt   time.Time
+	WireBytes   []byte // Pre-cooked HTTP/1.1 wire representation for zero-copy streaming
 }
 
 // Store defines the cache storage interface for Precog.
