@@ -215,9 +215,9 @@ Inspect real-time predictive cache metrics:
 
 ```go
 stats := engine.Stats()
-fmt.Printf("Hit Rate: %.2f%%\n", stats.HitRatio() * 100)
-fmt.Printf("Prefetches Triggered: %d\n", stats.Prefetches)
-fmt.Printf("Hits from Cache: %d\n", stats.Hits)
+fmt.Printf("Hit Rate: %.2f%%\n", stats.HitRate * 100)
+fmt.Printf("Prefetches Triggered: %d\n", stats.PrefetchesExecuted)
+fmt.Printf("Hits from Cache: %d\n", stats.CacheHits)
 ```
 
 ---

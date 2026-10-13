@@ -48,7 +48,7 @@ func TestPrecogBasicCaching(t *testing.T) {
 		t.Errorf("expected 1 handler call, got %d", atomic.LoadInt32(&handlerCalls))
 	}
 
-	// 2nd request -> Cache HIT (served from RAM, handler never called again)
+	// Second request should result in a cache hit
 	resp2, err := client.Get(server.URL + "/api/data")
 	if err != nil {
 		t.Fatalf("second request failed: %v", err)
@@ -104,10 +104,10 @@ func TestPrecogSpeculativePrewarming(t *testing.T) {
 	}
 	resp1.Body.Close()
 
-	// Allow speculative background worker 150ms to warm /api/cart in RAM
+	// Allow background prefetcher time to warm /api/cart in cache
 	time.Sleep(150 * time.Millisecond)
 
-	// User now clicks /api/cart: Should be an instant CACHE HIT!
+	// Subsequent request to /api/cart should be served from cache
 	req, _ := http.NewRequest("GET", server.URL+"/api/cart", nil)
 	// Pass the same session cookie received from first call
 	for _, c := range resp1.Cookies() {
@@ -157,7 +157,7 @@ func TestPrecogOnlineLearningFromLiveTraffic(t *testing.T) {
 
 	client := server.Client()
 
-	// --- PHASE 1: User A trains the model naturally through live traffic ---
+	// Phase 1: User A generates transition traffic
 	// User A visits /step1
 	userAResp1, err := client.Get(server.URL + "/step1")
 	if err != nil {
@@ -166,7 +166,7 @@ func TestPrecogOnlineLearningFromLiveTraffic(t *testing.T) {
 	userACookies := userAResp1.Cookies()
 	userAResp1.Body.Close()
 
-	// User A visits /step2 using their session cookie
+	// User A visits /step2 using session cookie
 	reqA2, _ := http.NewRequest("GET", server.URL+"/step2", nil)
 	for _, c := range userACookies {
 		reqA2.AddCookie(c)
@@ -177,7 +177,7 @@ func TestPrecogOnlineLearningFromLiveTraffic(t *testing.T) {
 	}
 	userAResp2.Body.Close()
 
-	// --- PHASE 2: New User B arrives (zero history) ---
+	// Phase 2: User B visits /step1 without prior history
 	userBResp1, err := client.Get(server.URL + "/step1")
 	if err != nil {
 		t.Fatalf("User B step 1 failed: %v", err)
@@ -185,10 +185,10 @@ func TestPrecogOnlineLearningFromLiveTraffic(t *testing.T) {
 	userBCookies := userBResp1.Cookies()
 	userBResp1.Body.Close()
 
-	// Wait 150ms for background prefetcher to speculatively execute /step2 for User B
+	// Wait for background prefetcher to speculatively execute /step2
 	time.Sleep(150 * time.Millisecond)
 
-	// User B visits /step2: Should be an instant CACHE HIT!
+	// User B visits /step2; request should be served from cache
 	reqB2, _ := http.NewRequest("GET", server.URL+"/step2", nil)
 	for _, c := range userBCookies {
 		reqB2.AddCookie(c)

@@ -21,15 +21,14 @@ const (
 	entryHeaderSize = 28
 )
 
-// ShardedConfig configures the Zero-GC ShardedStore.
+// ShardedConfig configures the ShardedStore.
 type ShardedConfig struct {
 	NumShards    int
 	MaxCostBytes int64
 }
 
-// ShardedStore is a pointer-free, Zero-GC cache partitioned across 256 shards.
-// Because the internal index uses map[uint64]uint32 (primitive keys and values),
-// the Go Garbage Collector completely ignores this map during GC STW and mark phases.
+// ShardedStore is a partitioned byte-arena cache implementing Store.
+// It uses primitive uint64 keys and uint32 offsets to minimize garbage collector scanning.
 type ShardedStore struct {
 	shards    []*cacheShard
 	numShards uint64
@@ -37,15 +36,13 @@ type ShardedStore struct {
 
 type cacheShard struct {
 	mu      sync.RWMutex
-	// ZERO-POINTER MAP: keys are uint64, values are uint32 offset in ring.
-	// GC does not trace or scan this map.
 	entries map[uint64]uint32
 	ring    []byte
 	tail    uint32
 	maxSize uint32
 }
 
-// NewShardedStore initializes a 256-shard Zero-GC cache.
+// NewShardedStore initializes a new sharded byte store.
 func NewShardedStore(cfg *ShardedConfig) *ShardedStore {
 	numShards := DefaultShards
 	var maxBytes int64 = DefaultShards * DefaultMaxShardSize
@@ -83,8 +80,7 @@ func (s *ShardedStore) shardFor(h uint64) *cacheShard {
 	return s.shards[h%s.numShards]
 }
 
-// PreCookWireResponse serializes an HTTP response into ready-to-stream wire bytes.
-// Enables direct socket DMA transmission, bypassing HTTP framework overhead.
+// PreCookWireResponse serializes an HTTP response into a ready-to-stream wire format.
 func PreCookWireResponse(statusCode int, contentType string, body []byte) []byte {
 	statusText := http.StatusText(statusCode)
 	if statusText == "" {
@@ -98,8 +94,7 @@ func PreCookWireResponse(statusCode int, contentType string, body []byte) []byte
 	return buf.Bytes()
 }
 
-// WriteResponse intelligently streams the response. If Hijacker is available,
-// it streams pre-cooked wire bytes directly with zero copies. Otherwise falls back to standard HTTP.
+// WriteResponse streams the response payload, leveraging connection hijacking when supported.
 func (e *ResponseEntry) WriteResponse(w http.ResponseWriter) (int64, error) {
 	if hj, ok := w.(http.Hijacker); ok && len(e.WireBytes) > 0 {
 		conn, bufrw, err := hj.Hijack()

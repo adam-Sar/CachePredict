@@ -8,8 +8,7 @@ import (
 )
 
 const (
-	// L1Slots is the size of the direct-mapped lock-free L1 cache.
-	// 256 slots indexed by (hash & 255) ensures ~1ns reads with zero locks.
+	// L1Slots defines the number of direct-mapped atomic cache slots.
 	L1Slots = 256
 )
 
@@ -19,9 +18,8 @@ type l1Slot struct {
 	entry    atomic.Pointer[ResponseEntry]
 }
 
-// TieredStore implements a two-tier caching hierarchy:
-// - Tier 1 (L1): Direct-mapped atomic lock-free cache (< 2ns reads, 0 lock contention)
-// - Tier 2 (L2): Sharded Zero-GC pointer-free store (256 striped partitions)
+// TieredStore implements a two-tier caching hierarchy combining a direct-mapped
+// atomic L1 cache with a sharded L2 store.
 type TieredStore struct {
 	l1 [L1Slots]l1Slot
 	l2 Store
@@ -43,24 +41,24 @@ func (t *TieredStore) Get(key string) (*ResponseEntry, bool) {
 	h := xxhash.Sum64String(key)
 	slotIdx := h & (L1Slots - 1)
 
-	// --- 1. Probe L1 Atomic Slot ---
+	// Probe L1 atomic slot
 	if t.l1[slotIdx].hash.Load() == h {
 		exp := t.l1[slotIdx].expireAt.Load()
 		if exp == 0 || time.Now().UnixNano() <= exp {
 			entry := t.l1[slotIdx].entry.Load()
 			if entry != nil {
-				return entry, true // L1 Hit (~1.5ns)
+				return entry, true
 			}
 		}
 	}
 
-	// --- 2. Fall back to L2 Global Store ---
+	// Fall back to L2 store
 	entry, found := t.l2.Get(key)
 	if !found || entry == nil {
 		return nil, false
 	}
 
-	// --- 3. Promote to L1 ---
+	// Promote entry to L1
 	t.promoteL1(slotIdx, h, entry, 0)
 	return entry, true
 }

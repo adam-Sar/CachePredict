@@ -1,7 +1,6 @@
 package precog_test
 
 import (
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -26,7 +25,7 @@ func TestInflightCoalescer(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			entry, err := g.Do("product_42_key", func() (*precog.ResponseEntry, error) {
-				// Simulating slow 90km database roundtrip
+				// Simulate slow database query latency
 				atomic.AddInt32(&dbQueries, 1)
 				time.Sleep(50 * time.Millisecond)
 
@@ -46,12 +45,12 @@ func TestInflightCoalescer(t *testing.T) {
 
 	wg.Wait()
 
-	// CRITICAL PROOF: The database was queried EXACTLY ONCE across all 20 concurrent requests!
+	// Verify the upstream handler was invoked exactly once
 	if atomic.LoadInt32(&dbQueries) != 1 {
-		t.Fatalf("expected EXACTLY 1 database query, got %d queries!", atomic.LoadInt32(&dbQueries))
+		t.Fatalf("expected 1 database query, got %d", atomic.LoadInt32(&dbQueries))
 	}
 
-	// Verify all 20 callers received the valid response
+	// Verify all callers received the valid response
 	for i, resp := range responses {
 		if resp == nil || string(resp.Body) != `{"id":42,"name":"Sneakers"}` {
 			t.Errorf("caller %d got invalid response", i)
@@ -64,7 +63,6 @@ func TestMiddlewareRequestCoalescingUnderLoad(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/slow-resource", func(w http.ResponseWriter, r *http.Request) {
-		// Simulate 90km database roundtrip
 		atomic.AddInt32(&dbCalls, 1)
 		time.Sleep(40 * time.Millisecond)
 		w.Header().Set("Content-Type", "application/json")
@@ -87,7 +85,6 @@ func TestMiddlewareRequestCoalescingUnderLoad(t *testing.T) {
 	var wg sync.WaitGroup
 	concurrentRequests := 15
 
-	// Fire 15 requests simultaneously at the un-cached endpoint
 	for i := 0; i < concurrentRequests; i++ {
 		wg.Add(1)
 		go func(reqNum int) {
@@ -106,11 +103,8 @@ func TestMiddlewareRequestCoalescingUnderLoad(t *testing.T) {
 
 	wg.Wait()
 
-	// PROOF: Out of 15 simultaneous requests hitting a cold route,
-	// only 1 hit the database! The remaining 14 were coalesced in-flight.
 	calls := atomic.LoadInt32(&dbCalls)
 	if calls != 1 {
-		t.Fatalf("expected EXACTLY 1 DB call for coalesced in-flight requests, got %d", calls)
+		t.Fatalf("expected 1 DB call for coalesced in-flight requests, got %d", calls)
 	}
-	fmt.Printf("[Coalescing Test Passed] 15 simultaneous requests triggered only %d DB call!\n", calls)
 }

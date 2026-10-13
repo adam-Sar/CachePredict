@@ -7,10 +7,10 @@ import (
 
 // Config configures the Precog SDK engine.
 type Config struct {
-	// Store is the cache storage backend. Defaults to RistrettoStore (in-memory) if nil.
+	// Store is the cache storage backend. Defaults to TieredStore wrapping ShardedStore if nil.
 	Store Store
 
-	// Predictor is the AI navigation sequence predictor. Defaults to AdaptiveMarkovPredictor if nil.
+	// Predictor is the navigation sequence predictor. Defaults to DenseMatrixPredictor if nil.
 	Predictor Predictor
 
 	// ConfidenceThreshold is the minimum probability (0.0 to 1.0) required to trigger speculative pre-warming.
@@ -64,13 +64,13 @@ func New(cfg Config) (*Engine, error) {
 		cfg.Workers = 4
 	}
 
-	// Initialize default store if not provided: Two-Tier (L1 atomic + L2 256-shard Zero-GC BigCache)
+	// Initialize default store if not provided (two-tier L1/L2 sharded store)
 	store := cfg.Store
 	if store == nil {
 		store = NewTieredStore(NewShardedStore(nil))
 	}
 
-	// Initialize default predictor if not provided: Lock-free Dense Contiguous Matrix
+	// Initialize default predictor if not provided (dense transition matrix)
 	predictor := cfg.Predictor
 	if predictor == nil {
 		predictor = NewDenseMatrixPredictor(nil)

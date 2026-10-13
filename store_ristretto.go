@@ -8,8 +8,7 @@ import (
 	"github.com/dgraph-io/ristretto"
 )
 
-// RistrettoStore is the high-performance in-memory cache implementation using TinyLFU.
-// Note: ShardedStore is recommended for zero-GC overhead and synchronous write consistency.
+// RistrettoStore implements Store using TinyLFU cache eviction.
 type RistrettoStore struct {
 	cache *ristretto.Cache
 }

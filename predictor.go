@@ -20,8 +20,7 @@ type Predictor interface {
 	ResetSession(sessionID string)
 }
 
-// AdaptiveMarkovPredictor learns navigation sequences online in real-time.
-// It requires zero pre-training and automatically builds a transition matrix from live traffic.
+// AdaptiveMarkovPredictor models navigation sequences using a map-based Markov chain.
 type AdaptiveMarkovPredictor struct {
 	mu          sync.RWMutex
 	maxHistory  int
@@ -31,13 +30,13 @@ type AdaptiveMarkovPredictor struct {
 }
 
 type historyStep struct {
-	concrete string // "GET /products?id=44"
-	pattern  string // "GET /products"
+	concrete string // e.g. "GET /products?id=44"
+	pattern  string // e.g. "GET /products/:id"
 	path     string
 	query    string
 }
 
-// NewAdaptiveMarkovPredictor creates a real-time self-learning Markov chain predictor.
+// NewAdaptiveMarkovPredictor creates a map-based Markov chain predictor.
 func NewAdaptiveMarkovPredictor() *AdaptiveMarkovPredictor {
 	return &AdaptiveMarkovPredictor{
 		maxHistory:  10,

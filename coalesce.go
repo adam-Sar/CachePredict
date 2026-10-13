@@ -19,10 +19,9 @@ type coalesceShard struct {
 	calls map[string]*inflightCall
 }
 
-// InflightGroup deduplicates concurrent requests for the same cache key.
-// If a background prefetcher or another request is currently fetching data from
-// the database, subsequent requests automatically wait and share the single result
-// directly from memory, stopping any duplicate queries before they reach the database.
+// InflightGroup coalesces concurrent requests for identical cache keys.
+// Subsequent requests wait on the active in-flight execution and share the resulting entry,
+// preventing duplicate upstream database or handler invocations.
 type InflightGroup struct {
 	shards [numCoalesceShards]coalesceShard
 }
@@ -41,17 +40,15 @@ func (g *InflightGroup) shardFor(key string) *coalesceShard {
 	return &g.shards[h%numCoalesceShards]
 }
 
-// Do executes fn once for a given key. If another call is already in-flight for
-// the same key, it blocks until the active call finishes and returns the cached result,
-// preventing any duplicate database calls.
+// Do executes fn once for a given key. Concurrent callers with identical keys
+// block until the active execution completes and share the returned entry.
 func (g *InflightGroup) Do(key string, fn func() (*ResponseEntry, error)) (*ResponseEntry, error) {
 	sh := g.shardFor(key)
 
 	sh.mu.Lock()
 	if c, exists := sh.calls[key]; exists {
-		// Call is ALREADY in-flight!
 		sh.mu.Unlock()
-		c.wg.Wait() // Wait for active DB query to complete
+		c.wg.Wait()
 		return c.entry, c.err
 	}
 

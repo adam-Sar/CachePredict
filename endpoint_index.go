@@ -8,13 +8,12 @@ import (
 // MaxIndexedRoutes is the maximum number of distinct API endpoint patterns supported.
 const MaxIndexedRoutes = 4096
 
-// EndpointRegistry dynamically and thread-safely maps route patterns
-// (e.g. "GET /items/:id", "POST /cart") to compact uint16 integer IDs.
-// This enables nanosecond-speed L1 CPU cache array lookups instead of slow string map hashing.
+// EndpointRegistry maps normalized route patterns to compact uint16 identifiers.
+// Reads are lock-free via atomic.Value Copy-On-Write.
 type EndpointRegistry struct {
 	mu       sync.Mutex
-	patterns atomic.Value // holds map[string]uint16 for lock-free reads
-	reverse  atomic.Value // holds []string for O(1) reverse lookup by uint16
+	patterns atomic.Value // holds map[string]uint16
+	reverse  atomic.Value // holds []string
 	count    uint32
 }
 
@@ -26,16 +25,15 @@ func NewEndpointRegistry() *EndpointRegistry {
 	return r
 }
 
-// GetOrRegister returns the uint16 ID for a route pattern, registering it if new.
-// Fast path is completely lock-free using atomic.Value.
+// GetOrRegister returns the uint16 identifier for a route pattern, registering it if new.
 func (r *EndpointRegistry) GetOrRegister(pattern string) uint16 {
-	// 1. Lock-free fast path for known routes
+	// Lock-free fast path for existing routes
 	m := r.patterns.Load().(map[string]uint16)
 	if id, exists := m[pattern]; exists {
 		return id
 	}
 
-	// 2. Slow path: register new route pattern under lock
+	// Slow path: register new route pattern under lock
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -70,7 +68,7 @@ func (r *EndpointRegistry) GetOrRegister(pattern string) uint16 {
 	return newID
 }
 
-// Lookup returns the ID for a pattern if registered, or false. (Zero allocations, lock-free)
+// Lookup returns the ID for a pattern if registered, or false.
 func (r *EndpointRegistry) Lookup(pattern string) (uint16, bool) {
 	m := r.patterns.Load().(map[string]uint16)
 	id, ok := m[pattern]

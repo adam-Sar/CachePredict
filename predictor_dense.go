@@ -10,16 +10,14 @@ import (
 )
 
 const (
-	// DefaultMaxDenseRoutes is the dimension of the contiguous transition matrix.
-	// 1024 x 1024 uint32 = 4MB flat contiguous array with ZERO pointers.
+	// DefaultMaxDenseRoutes defines the maximum route matrix dimension (1024 x 1024).
 	DefaultMaxDenseRoutes = 1024
-	// NumSessionShards partitions user sessions to eliminate mutex contention.
+	// NumSessionShards partitions user sessions to minimize mutex contention.
 	NumSessionShards = 64
 )
 
-// DenseMatrixPredictor is a lock-free, zero-GC, CPU cache-friendly Markov predictor.
-// It uses a dense contiguous 2D array [MaxRoutes * MaxRoutes] of uint32 counters,
-// updated via atomic hardware instructions (atomic.AddUint32) with zero mutex locks.
+// DenseMatrixPredictor models endpoint transition probabilities using a dense contiguous matrix.
+// State transitions are updated atomically using atomic CPU instructions.
 type DenseMatrixPredictor struct {
 	registry   *EndpointRegistry
 	maxRoutes  uint32
@@ -144,7 +142,7 @@ type candidate struct {
 	count uint32
 }
 
-// Predict finds top-K highest probability transitions with nanosecond CPU L1 cache locality.
+// Predict calculates top-K candidate routes for the active session.
 func (p *DenseMatrixPredictor) Predict(sessionID string, topK int) []Prediction {
 	sh := p.shardFor(sessionID)
 	sh.mu.RLock()

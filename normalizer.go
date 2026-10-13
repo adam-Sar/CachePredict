@@ -19,8 +19,8 @@ var (
 	hexIdRe = regexp.MustCompile(`/[0-9a-fA-F]{24}(/|$)`)
 )
 
-// NormalizeRoute converts a concrete path into an abstract pattern token for AI training.
-// e.g. "GET /products/44" -> "GET /products/:id"
+// NormalizeRoute converts concrete request paths into parameterized route patterns.
+// Example: "GET /products/44" -> "GET /products/:id"
 func NormalizeRoute(method, path string) string {
 	m := strings.ToUpper(method)
 	p := path
@@ -35,8 +35,7 @@ func NormalizeRoute(method, path string) string {
 	return m + " " + p
 }
 
-// FastHash64 computes a 64-bit non-cryptographic hash in nanoseconds using xxHash.
-// Over 100x faster than SHA-256 with zero unnecessary heap allocations.
+// FastHash64 computes a 64-bit non-cryptographic hash using xxHash.
 func FastHash64(method, path, rawQuery, body string) uint64 {
 	method = strings.ToUpper(method)
 
@@ -64,8 +63,7 @@ func FastHash64(method, path, rawQuery, body string) uint64 {
 	return xxhash.Sum64String(sb.String())
 }
 
-// CanonicalCacheKey computes a deterministic 16-character hex hash key using xxHash64.
-// Replaces slow SHA-256 for sub-microsecond cache access.
+// CanonicalCacheKey computes a deterministic 16-character hexadecimal hash key.
 func CanonicalCacheKey(method, path, rawQuery, body string) string {
 	h := FastHash64(method, path, rawQuery, body)
 	return fmt.Sprintf("%016x", h)
