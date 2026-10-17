@@ -12,10 +12,14 @@ const (
 	L1Slots = 256
 )
 
+type l1Entry struct {
+	hash     uint64
+	expireAt int64
+	entry    *ResponseEntry
+}
+
 type l1Slot struct {
-	hash     atomic.Uint64
-	expireAt atomic.Int64
-	entry    atomic.Pointer[ResponseEntry]
+	data atomic.Pointer[l1Entry]
 }
 
 // TieredStore implements a two-tier caching hierarchy combining a direct-mapped
@@ -41,13 +45,11 @@ func (t *TieredStore) Get(key string) (*ResponseEntry, bool) {
 	h := xxhash.Sum64String(key)
 	slotIdx := h & (L1Slots - 1)
 
-	// Probe L1 atomic slot
-	if t.l1[slotIdx].hash.Load() == h {
-		exp := t.l1[slotIdx].expireAt.Load()
-		if exp == 0 || time.Now().UnixNano() <= exp {
-			entry := t.l1[slotIdx].entry.Load()
-			if entry != nil {
-				return entry, true
+	// Probe L1 atomic slot (lock-free immutable snapshot)
+	if item := t.l1[slotIdx].data.Load(); item != nil && item.hash == h {
+		if item.expireAt == 0 || time.Now().UnixNano() <= item.expireAt {
+			if item.entry != nil {
+				return item.entry, true
 			}
 		}
 	}
@@ -58,8 +60,16 @@ func (t *TieredStore) Get(key string) (*ResponseEntry, bool) {
 		return nil, false
 	}
 
-	// Promote entry to L1
-	t.promoteL1(slotIdx, h, entry, 0)
+	var exp int64
+	if !entry.ExpiresAt.IsZero() {
+		exp = entry.ExpiresAt.UnixNano()
+		if time.Now().UnixNano() > exp {
+			return nil, false
+		}
+	}
+
+	// Promote entry to L1 with remaining expiration
+	t.promoteL1(slotIdx, h, entry, exp)
 	return entry, true
 }
 
@@ -67,6 +77,12 @@ func (t *TieredStore) Get(key string) (*ResponseEntry, bool) {
 func (t *TieredStore) Set(key string, entry *ResponseEntry, ttl time.Duration) bool {
 	if entry == nil {
 		return false
+	}
+
+	var exp int64
+	if ttl > 0 {
+		entry.ExpiresAt = time.Now().Add(ttl)
+		exp = entry.ExpiresAt.UnixNano()
 	}
 
 	// Write to L2
@@ -78,18 +94,16 @@ func (t *TieredStore) Set(key string, entry *ResponseEntry, ttl time.Duration) b
 	// Promote to L1
 	h := xxhash.Sum64String(key)
 	slotIdx := h & (L1Slots - 1)
-	var exp int64
-	if ttl > 0 {
-		exp = time.Now().Add(ttl).UnixNano()
-	}
 	t.promoteL1(slotIdx, h, entry, exp)
 	return true
 }
 
 func (t *TieredStore) promoteL1(slotIdx uint64, h uint64, entry *ResponseEntry, exp int64) {
-	t.l1[slotIdx].entry.Store(entry)
-	t.l1[slotIdx].expireAt.Store(exp)
-	t.l1[slotIdx].hash.Store(h)
+	t.l1[slotIdx].data.Store(&l1Entry{
+		hash:     h,
+		expireAt: exp,
+		entry:    entry,
+	})
 }
 
 // Del invalidates the key in both L1 and L2.
@@ -97,9 +111,8 @@ func (t *TieredStore) Del(key string) {
 	h := xxhash.Sum64String(key)
 	slotIdx := h & (L1Slots - 1)
 
-	if t.l1[slotIdx].hash.Load() == h {
-		t.l1[slotIdx].hash.Store(0)
-		t.l1[slotIdx].entry.Store(nil)
+	if item := t.l1[slotIdx].data.Load(); item != nil && item.hash == h {
+		t.l1[slotIdx].data.CompareAndSwap(item, nil)
 	}
 
 	t.l2.Del(key)
@@ -113,8 +126,7 @@ func (t *TieredStore) L2() Store {
 // Close closes the underlying L2 store and clears L1.
 func (t *TieredStore) Close() error {
 	for i := 0; i < L1Slots; i++ {
-		t.l1[i].hash.Store(0)
-		t.l1[i].entry.Store(nil)
+		t.l1[i].data.Store(nil)
 	}
 	return t.l2.Close()
 }

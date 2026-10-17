@@ -25,6 +25,8 @@ type DenseMatrixPredictor struct {
 	totals     []uint32 // Total transitions out of fromID: index = fromID
 	shards     [NumSessionShards]sessionShard
 	maxHistory int
+	concreteMu sync.RWMutex
+	concrete   map[uint16]string
 }
 
 type sessionShard struct {
@@ -73,6 +75,7 @@ func NewDenseMatrixPredictor(cfg *DensePredictorConfig) *DenseMatrixPredictor {
 		matrix:     make([]uint32, maxRoutes*maxRoutes),
 		totals:     make([]uint32, maxRoutes),
 		maxHistory: maxHistory,
+		concrete:   make(map[uint16]string),
 	}
 
 	for i := 0; i < NumSessionShards; i++ {
@@ -111,6 +114,12 @@ func (p *DenseMatrixPredictor) Record(sessionID string, method, path, rawQuery s
 		query:    rawQuery,
 	}
 
+	if !strings.Contains(path, ":id") && !strings.Contains(path, ":uuid") && !strings.Contains(path, ":hex") {
+		p.concreteMu.Lock()
+		p.concrete[toID] = concrete
+		p.concreteMu.Unlock()
+	}
+
 	sh := p.shardFor(sessionID)
 	sh.mu.Lock()
 
@@ -119,6 +128,14 @@ func (p *DenseMatrixPredictor) Record(sessionID string, method, path, rawQuery s
 	hasPrior := len(hist) > 0
 	if hasPrior {
 		fromID = hist[len(hist)-1].id
+	}
+
+	// Bound total tracked sessions in shard to prevent memory leak
+	if len(hist) == 0 && len(sh.sessions) >= 500 {
+		for k := range sh.sessions {
+			delete(sh.sessions, k)
+			break
+		}
 	}
 
 	// Append to session history (capped at maxHistory)
@@ -201,7 +218,7 @@ func (p *DenseMatrixPredictor) Predict(sessionID string, topK int) []Prediction 
 		prob := float64(cand.count) / float64(total)
 		pat := p.registry.Pattern(cand.toID)
 
-		concreteCall := p.hydrateCall(pat, lastStep)
+		concreteCall := p.hydrateCall(cand.toID, pat, lastStep)
 
 		predictions = append(predictions, Prediction{
 			Call:        concreteCall,
@@ -213,7 +230,7 @@ func (p *DenseMatrixPredictor) Predict(sessionID string, topK int) []Prediction 
 	return predictions
 }
 
-func (p *DenseMatrixPredictor) hydrateCall(pattern string, lastStep denseStep) string {
+func (p *DenseMatrixPredictor) hydrateCall(candToID uint16, pattern string, lastStep denseStep) string {
 	parts := strings.SplitN(pattern, " ", 2)
 	if len(parts) < 2 {
 		return pattern
@@ -223,13 +240,56 @@ func (p *DenseMatrixPredictor) hydrateCall(pattern string, lastStep denseStep) s
 
 	call := method + " " + pathPattern
 
-	// If target needs an ID and previous call had concrete query/path, preserve context
-	if strings.Contains(pathPattern, ":id") {
-		segments := strings.Split(lastStep.path, "/")
-		for _, seg := range segments {
-			if seg != "" && isNumeric(seg) {
-				call = strings.Replace(call, ":id", seg, 1)
+	var activeID string
+	// Check lastStep.path for ID
+	segments := strings.Split(lastStep.path, "/")
+	for i := len(segments) - 1; i >= 0; i-- {
+		seg := segments[i]
+		if seg == "" {
+			continue
+		}
+		if isNumeric(seg) {
+			activeID = seg
+			break
+		}
+	}
+
+	// Also check lastStep.query for product_id or id
+	if activeID == "" && lastStep.query != "" {
+		for _, qp := range strings.Split(lastStep.query, "&") {
+			kv := strings.SplitN(qp, "=", 2)
+			if len(kv) == 2 && (kv[0] == "id" || kv[0] == "product_id") && isNumeric(kv[1]) {
+				activeID = kv[1]
 				break
+			}
+		}
+	}
+
+	if activeID != "" && strings.Contains(call, ":id") {
+		call = strings.Replace(call, ":id", activeID, 1)
+	}
+
+	// If call still has :id, :uuid, :hex, check concrete cache
+	if strings.Contains(call, ":id") || strings.Contains(call, ":uuid") || strings.Contains(call, ":hex") {
+		p.concreteMu.RLock()
+		known := p.concrete[candToID]
+		p.concreteMu.RUnlock()
+		if known != "" {
+			call = known
+		}
+	}
+
+	// Carry forward query context if target has no query but reviews/item needs it
+	if !strings.Contains(call, "?") {
+		if activeID != "" && (strings.Contains(call, "reviews") || strings.Contains(call, "review")) {
+			call += "?product_id=" + activeID
+		} else {
+			p.concreteMu.RLock()
+			known := p.concrete[candToID]
+			p.concreteMu.RUnlock()
+			if known != "" && strings.Contains(known, "?") {
+				qIdx := strings.Index(known, "?")
+				call += known[qIdx:]
 			}
 		}
 	}

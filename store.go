@@ -1,6 +1,7 @@
 package precog
 
 import (
+	"net/http"
 	"sync"
 	"time"
 )
@@ -8,10 +9,12 @@ import (
 // ResponseEntry represents the HTTP response stored in the cache.
 type ResponseEntry struct {
 	Body        []byte
+	Header      http.Header
 	ContentType string
 	StatusCode  int
 	CreatedAt   time.Time
-	WireBytes   []byte // Pre-cooked HTTP/1.1 wire representation for zero-copy streaming
+	ExpiresAt   time.Time
+	WireBytes   []byte // Optional pre-cooked HTTP/1.1 wire representation
 }
 
 // Store defines the cache storage interface for Precog.

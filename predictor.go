@@ -24,6 +24,7 @@ type Predictor interface {
 type AdaptiveMarkovPredictor struct {
 	mu          sync.RWMutex
 	maxHistory  int
+	maxSessions int
 	sessions    map[string][]historyStep
 	transitions map[string]map[string]int
 	totals      map[string]int
@@ -40,6 +41,7 @@ type historyStep struct {
 func NewAdaptiveMarkovPredictor() *AdaptiveMarkovPredictor {
 	return &AdaptiveMarkovPredictor{
 		maxHistory:  10,
+		maxSessions: 5000,
 		sessions:    make(map[string][]historyStep),
 		transitions: make(map[string]map[string]int),
 		totals:      make(map[string]int),
@@ -78,6 +80,14 @@ func (p *AdaptiveMarkovPredictor) Record(sessionID string, method, path, rawQuer
 		}
 		p.transitions[fromState][toState]++
 		p.totals[fromState]++
+	}
+
+	// Bound total tracked sessions to prevent memory leak
+	if len(hist) == 0 && len(p.sessions) >= p.maxSessions {
+		for k := range p.sessions {
+			delete(p.sessions, k)
+			break
+		}
 	}
 
 	// Append to session history (capped at maxHistory)
@@ -143,13 +153,22 @@ func (p *AdaptiveMarkovPredictor) reconstructCall(targetPattern string, last his
 	method := parts[0]
 	targetPath := parts[1]
 
-	// If the pattern has :id and the last call had an ID or query, propagate it
-	if strings.Contains(targetPath, ":id") {
-		// Replace :id with the ID from previous call if available
-		partsLast := strings.Split(last.path, "/")
-		if len(partsLast) > 0 {
-			lastID := partsLast[len(partsLast)-1]
-			targetPath = strings.Replace(targetPath, ":id", lastID, 1)
+	// Extract identifier segment from previous call if available
+	segments := strings.Split(last.path, "/")
+	for i := len(segments) - 1; i >= 0; i-- {
+		seg := segments[i]
+		if seg == "" {
+			continue
+		}
+		if isNumeric(seg) && strings.Contains(targetPath, ":id") {
+			targetPath = strings.Replace(targetPath, ":id", seg, 1)
+			break
+		} else if isUUID(seg) && strings.Contains(targetPath, ":uuid") {
+			targetPath = strings.Replace(targetPath, ":uuid", seg, 1)
+			break
+		} else if isHexID(seg) && strings.Contains(targetPath, ":hex") {
+			targetPath = strings.Replace(targetPath, ":hex", seg, 1)
+			break
 		}
 	}
 
@@ -159,6 +178,23 @@ func (p *AdaptiveMarkovPredictor) reconstructCall(targetPattern string, last his
 		call += "?" + last.query
 	}
 	return call
+}
+
+func isUUID(s string) bool {
+	return len(s) == 36 && s[8] == '-' && s[13] == '-' && s[18] == '-' && s[23] == '-'
+}
+
+func isHexID(s string) bool {
+	if len(s) != 24 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 // SeedTransition manually adds a known transition probability (useful for bootstrap/config).

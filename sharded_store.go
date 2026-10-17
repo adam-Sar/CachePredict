@@ -38,8 +38,8 @@ type cacheShard struct {
 	mu      sync.RWMutex
 	entries map[uint64]uint32
 	ring    []byte
-	tail    uint32
 	maxSize uint32
+	closed  bool
 }
 
 // NewShardedStore initializes a new sharded byte store.
@@ -94,27 +94,26 @@ func PreCookWireResponse(statusCode int, contentType string, body []byte) []byte
 	return buf.Bytes()
 }
 
-// WriteResponse streams the response payload, leveraging connection hijacking when supported.
+// WriteResponse streams the response payload cleanly via standard HTTP ResponseWriter.
 func (e *ResponseEntry) WriteResponse(w http.ResponseWriter) (int64, error) {
-	if hj, ok := w.(http.Hijacker); ok && len(e.WireBytes) > 0 {
-		conn, bufrw, err := hj.Hijack()
-		if err == nil {
-			defer conn.Close()
-			n, err := bufrw.Write(e.WireBytes)
-			if err == nil {
-				_ = bufrw.Flush()
-				return int64(n), nil
-			}
+	// Replay original response headers
+	for k, vv := range e.Header {
+		for _, v := range vv {
+			w.Header().Add(k, v)
 		}
 	}
 
-	// Standard ResponseWriter streaming
-	if e.ContentType != "" {
+	if e.ContentType != "" && w.Header().Get("Content-Type") == "" {
 		w.Header().Set("Content-Type", e.ContentType)
 	}
 	w.Header().Set("X-Cache", "HIT")
 	w.Header().Set("X-Precog", "ram-cache")
-	w.WriteHeader(e.StatusCode)
+
+	if e.StatusCode > 0 {
+		w.WriteHeader(e.StatusCode)
+	} else {
+		w.WriteHeader(http.StatusOK)
+	}
 	n, err := w.Write(e.Body)
 	return int64(n), err
 }
@@ -130,6 +129,10 @@ func (s *ShardedStore) GetByHash(h uint64) (*ResponseEntry, bool) {
 	sh := s.shardFor(h)
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
+
+	if sh.closed || sh.entries == nil {
+		return nil, false
+	}
 
 	offset, exists := sh.entries[h]
 	if !exists {
@@ -175,12 +178,18 @@ func (s *ShardedStore) GetByHash(h uint64) (*ResponseEntry, bool) {
 		copy(wireBytes, sh.ring[cursor:cursor+wireLen])
 	}
 
+	var expTime time.Time
+	if expireNano > 0 {
+		expTime = time.Unix(0, expireNano)
+	}
+
 	entry := &ResponseEntry{
 		StatusCode:  statusCode,
 		ContentType: contentType,
 		Body:        body,
 		WireBytes:   wireBytes,
 		CreatedAt:   time.Now(),
+		ExpiresAt:   expTime,
 	}
 
 	return entry, true
@@ -198,17 +207,16 @@ func (s *ShardedStore) SetByHash(h uint64, entry *ResponseEntry, ttl time.Durati
 		return false
 	}
 
-	// Ensure pre-cooked wire bytes exist
+	var expireNano int64
+	if ttl > 0 {
+		expireNano = time.Now().Add(ttl).UnixNano()
+		entry.ExpiresAt = time.Unix(0, expireNano)
+	}
+
 	wire := entry.WireBytes
 	if len(wire) == 0 && len(entry.Body) > 0 {
 		wire = PreCookWireResponse(entry.StatusCode, entry.ContentType, entry.Body)
 	}
-
-	var expireNano int64
-	if ttl > 0 {
-		expireNano = time.Now().Add(ttl).UnixNano()
-	}
-
 	ctBytes := []byte(entry.ContentType)
 	ctLen := len(ctBytes)
 	bodyLen := len(entry.Body)
@@ -220,14 +228,17 @@ func (s *ShardedStore) SetByHash(h uint64, entry *ResponseEntry, ttl time.Durati
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 
+	if sh.closed || sh.entries == nil {
+		return false
+	}
+
 	// If entry exceeds max shard size entirely, skip
 	if uint32(totalEntryLen) > sh.maxSize {
 		return false
 	}
 
-	// Ring capacity check & reset if full
+	// Capacity check & reset if full
 	if uint32(len(sh.ring))+uint32(totalEntryLen) > sh.maxSize {
-		// Reset ring buffer and clear index when max capacity reached (FIFO flush)
 		sh.ring = sh.ring[:0]
 		sh.entries = make(map[uint64]uint32)
 	}
@@ -246,7 +257,9 @@ func (s *ShardedStore) SetByHash(h uint64, entry *ResponseEntry, ttl time.Durati
 	sh.ring = append(sh.ring, hdr[:]...)
 	sh.ring = append(sh.ring, ctBytes...)
 	sh.ring = append(sh.ring, entry.Body...)
-	sh.ring = append(sh.ring, wire...)
+	if wireLen > 0 {
+		sh.ring = append(sh.ring, wire...)
+	}
 
 	sh.entries[h] = offset
 	return true
@@ -258,13 +271,16 @@ func (s *ShardedStore) Del(key string) {
 	sh := s.shardFor(h)
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
-	delete(sh.entries, h)
+	if !sh.closed && sh.entries != nil {
+		delete(sh.entries, h)
+	}
 }
 
 // Close implements Store.
 func (s *ShardedStore) Close() error {
 	for _, sh := range s.shards {
 		sh.mu.Lock()
+		sh.closed = true
 		sh.ring = nil
 		sh.entries = nil
 		sh.mu.Unlock()

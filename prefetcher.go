@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -19,17 +20,19 @@ type PrefetchJob struct {
 
 // Prefetcher executes speculative API requests in the background to warm the cache.
 type Prefetcher struct {
-	handler    http.Handler
-	store      Store
-	inflight   *InflightGroup
-	ttl        time.Duration
-	threshold  float64
-	jobChan    chan PrefetchJob
-	workers    int
-	wg         sync.WaitGroup
-	ctx        context.Context
-	cancel     context.CancelFunc
-	onWarmed   func(job PrefetchJob, key string, bytes int)
+	handler   http.Handler
+	store     Store
+	inflight  *InflightGroup
+	ttl       time.Duration
+	threshold float64
+	jobChan   chan PrefetchJob
+	workers   int
+	wg        sync.WaitGroup
+	ctx       context.Context
+	cancel    context.CancelFunc
+	onWarmed  func(job PrefetchJob, key string, bytes int)
+	closeOnce sync.Once
+	closed    atomic.Bool
 }
 
 // NewPrefetcher initializes a worker pool for speculative cache warming.
@@ -64,7 +67,7 @@ func (p *Prefetcher) SetOnWarmed(fn func(job PrefetchJob, key string, bytes int)
 
 // Submit queues predictions that meet the confidence threshold for background warming.
 func (p *Prefetcher) Submit(sessionID string, preds []Prediction, origReq *http.Request) {
-	if p.handler == nil {
+	if p.handler == nil || p.closed.Load() || p.ctx.Err() != nil {
 		return
 	}
 
@@ -81,6 +84,10 @@ func (p *Prefetcher) Submit(sessionID string, preds []Prediction, origReq *http.
 	for _, pred := range preds {
 		if pred.Probability < p.threshold {
 			continue
+		}
+
+		if p.closed.Load() || p.ctx.Err() != nil {
+			return
 		}
 
 		select {
@@ -167,14 +174,30 @@ func (p *Prefetcher) execute(job PrefetchJob) {
 		}()
 
 		if rec.Code == http.StatusOK {
+			cc := rec.Header().Get("Cache-Control")
+			if strings.Contains(cc, "no-store") || strings.Contains(cc, "private") {
+				return nil, nil
+			}
+			// Authenticated responses must not be cached globally unless explicitly public
+			if job.AuthHeaders.Get("Authorization") != "" && !strings.Contains(cc, "public") {
+				return nil, nil
+			}
+
 			body := rec.Body.Bytes()
 			contentType := rec.Header().Get("Content-Type")
+
+			hdr := make(http.Header)
+			for k, vv := range rec.Header() {
+				hdr[k] = append([]string(nil), vv...)
+			}
+
 			entry := &ResponseEntry{
 				Body:        body,
+				Header:      hdr,
 				ContentType: contentType,
 				StatusCode:  rec.Code,
 				CreatedAt:   time.Now(),
-				WireBytes:   PreCookWireResponse(rec.Code, contentType, body),
+				ExpiresAt:   time.Now().Add(p.ttl),
 			}
 			p.store.Set(cacheKey, entry, p.ttl)
 			if p.onWarmed != nil {
@@ -194,7 +217,9 @@ func (p *Prefetcher) execute(job PrefetchJob) {
 
 // Close gracefully terminates the worker pool.
 func (p *Prefetcher) Close() {
-	p.cancel()
-	close(p.jobChan)
-	p.wg.Wait()
+	p.closeOnce.Do(func() {
+		p.closed.Store(true)
+		p.cancel()
+		p.wg.Wait()
+	})
 }

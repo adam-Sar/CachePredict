@@ -138,15 +138,36 @@
     if (method === 'GET' && precogCache && url) {
       const cached = await precogCache.match(resource);
       if (cached) {
-        // Clone cached response so it can be consumed
-        const clone = cached.clone();
         // Evict one-time speculative hit
         precogCache.delete(resource);
-        return clone;
+
+        // Construct response with X-Cache: HIT
+        const newHeaders = new Headers(cached.headers);
+        newHeaders.set('X-Cache', 'HIT');
+        newHeaders.set('X-Precog', 'browser-cache');
+        const blob = await cached.blob();
+        return new Response(blob, {
+          status: cached.status,
+          statusText: cached.statusText,
+          headers: newHeaders
+        });
       }
     }
 
-    return originalFetch.apply(this, arguments);
+    const resp = await originalFetch.apply(this, arguments);
+
+    // If this was an explicit speculative prefetch, save into CacheStorage for instant retrieval
+    const isSpec = init && init.headers && (
+      (init.headers['X-Precog-Speculative'] === 'true') ||
+      (typeof init.headers.get === 'function' && init.headers.get('X-Precog-Speculative') === 'true')
+    );
+    if (isSpec && precogCache && method === 'GET' && resp && resp.ok && url) {
+      try {
+        await precogCache.put(resource, resp.clone());
+      } catch (err) {}
+    }
+
+    return resp;
   };
 
   // Intercept link clicks / hovers for predictive navigation

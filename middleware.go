@@ -11,31 +11,6 @@ import (
 	"time"
 )
 
-// responseRecorder captures the status code, headers, and body of the downstream handler.
-type responseRecorder struct {
-	http.ResponseWriter
-	buf         *bytes.Buffer
-	status      int
-	wroteHeader bool
-}
-
-func (r *responseRecorder) WriteHeader(status int) {
-	if !r.wroteHeader {
-		r.status = status
-		r.wroteHeader = true
-	}
-	r.ResponseWriter.WriteHeader(status)
-}
-
-func (r *responseRecorder) Write(b []byte) (int, error) {
-	if !r.wroteHeader {
-		r.status = http.StatusOK
-		r.wroteHeader = true
-	}
-	r.buf.Write(b)
-	return r.ResponseWriter.Write(b)
-}
-
 // Middleware returns a standard net/http middleware handler.
 func (e *Engine) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -44,11 +19,8 @@ func (e *Engine) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Ignore prefetch loopback requests to prevent recursion
-		if r.Header.Get("X-Precog-Speculative") != "" {
-			next.ServeHTTP(w, r)
-			return
-		}
+		// Mark if this is a speculative loopback/prefetch request
+		isSpeculative := r.Header.Get("X-Precog-Speculative") != ""
 
 		// Check if route is explicitly skipped
 		for _, skip := range e.config.SkipRoutes {
@@ -67,6 +39,7 @@ func (e *Engine) Middleware(next http.Handler) http.Handler {
 
 		method := strings.ToUpper(r.Method)
 		isSafe := method == "GET" || method == "HEAD"
+		hasAuth := r.Header.Get("Authorization") != ""
 
 		// Read body once for non-GET requests (if needed for cache key)
 		var bodyStr string
@@ -78,18 +51,18 @@ func (e *Engine) Middleware(next http.Handler) http.Handler {
 
 		cacheKey := CanonicalCacheKey(method, r.URL.Path, r.URL.RawQuery, bodyStr)
 
-		// 1. Check Cache for Safe Requests
-		if isSafe && cacheKey != "" {
+		// 1. Check Cache for Safe Requests (skip shared cache lookup for unconfirmed auth requests)
+		if isSafe && cacheKey != "" && !hasAuth {
 			if entry, found := e.store.Get(cacheKey); found {
 				e.telemetry.RecordHit()
 
-				// Record navigation in predictor so next predictions continue
-				e.predictor.Record(sid, method, r.URL.Path, r.URL.RawQuery)
-				e.triggerPrefetch(sid, r, w)
+				if !isSpeculative {
+					// Record navigation in predictor so next predictions continue
+					e.predictor.Record(sid, method, r.URL.Path, r.URL.RawQuery)
+					e.triggerPrefetch(sid, r, w)
+				}
 
-				// Serve with pre-cooked zero-copy streaming
-				w.Header().Set("X-Cache", "HIT")
-				w.Header().Set("X-Precog", "ram-cache")
+				// Serve with headers preserved
 				_, _ = entry.WriteResponse(w)
 				return
 			}
@@ -101,43 +74,62 @@ func (e *Engine) Middleware(next http.Handler) http.Handler {
 		if isSafe && cacheKey != "" && e.inflight != nil {
 			entry, err := e.inflight.Do(cacheKey, func() (*ResponseEntry, error) {
 				// Double-check cache in case prefetcher committed while we waited
-				if cached, found := e.store.Get(cacheKey); found {
-					return cached, nil
+				if !hasAuth {
+					if cached, found := e.store.Get(cacheKey); found {
+						return cached, nil
+					}
 				}
 
-				rec := &responseRecorder{
-					ResponseWriter: httptest.NewRecorder(),
-					buf:            &bytes.Buffer{},
-					status:         http.StatusOK,
-				}
+				rec := httptest.NewRecorder()
 				next.ServeHTTP(rec, r)
 
-				if rec.status == http.StatusOK {
-					respBody := rec.buf.Bytes()
-					contentType := rec.Header().Get("Content-Type")
-					ent := &ResponseEntry{
-						Body:        respBody,
-						ContentType: contentType,
-						StatusCode:  rec.status,
-						CreatedAt:   time.Now(),
-						WireBytes:   PreCookWireResponse(rec.status, contentType, respBody),
-					}
-					e.store.Set(cacheKey, ent, e.config.TTL)
-					return ent, nil
+				respBody := rec.Body.Bytes()
+				contentType := rec.Header().Get("Content-Type")
+				cc := rec.Header().Get("Cache-Control")
+
+				hdr := make(http.Header)
+				for k, vv := range rec.Header() {
+					hdr[k] = append([]string(nil), vv...)
 				}
-				return nil, nil
+
+				ent := &ResponseEntry{
+					Body:        respBody,
+					Header:      hdr,
+					ContentType: contentType,
+					StatusCode:  rec.Code,
+					CreatedAt:   time.Now(),
+					ExpiresAt:   time.Now().Add(e.config.TTL),
+				}
+
+				// Only cache safe responses according to RFC 9111
+				canCache := rec.Code == http.StatusOK &&
+					!strings.Contains(cc, "no-store") &&
+					!strings.Contains(cc, "private") &&
+					(!hasAuth || strings.Contains(cc, "public"))
+
+				if canCache {
+					e.store.Set(cacheKey, ent, e.config.TTL)
+				}
+				return ent, nil
 			})
 
 			if err == nil && entry != nil {
-				if entry.ContentType != "" {
+				for k, vv := range entry.Header {
+					for _, v := range vv {
+						w.Header().Add(k, v)
+					}
+				}
+				if entry.ContentType != "" && w.Header().Get("Content-Type") == "" {
 					w.Header().Set("Content-Type", entry.ContentType)
 				}
 				w.Header().Set("X-Cache", "MISS")
 				w.WriteHeader(entry.StatusCode)
 				_, _ = w.Write(entry.Body)
 
-				e.predictor.Record(sid, method, r.URL.Path, r.URL.RawQuery)
-				e.triggerPrefetch(sid, r, w)
+				if !isSpeculative {
+					e.predictor.Record(sid, method, r.URL.Path, r.URL.RawQuery)
+					e.triggerPrefetch(sid, r, w)
+				}
 				return
 			}
 		}
@@ -145,9 +137,11 @@ func (e *Engine) Middleware(next http.Handler) http.Handler {
 		// Fallback for non-GET or un-coalesced requests
 		w.Header().Set("X-Cache", "MISS")
 		next.ServeHTTP(w, r)
-		e.predictor.Record(sid, method, r.URL.Path, r.URL.RawQuery)
-		if isSafe {
-			e.triggerPrefetch(sid, r, w)
+		if !isSpeculative {
+			e.predictor.Record(sid, method, r.URL.Path, r.URL.RawQuery)
+			if isSafe {
+				e.triggerPrefetch(sid, r, w)
+			}
 		}
 	})
 }

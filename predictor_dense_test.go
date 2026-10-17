@@ -81,3 +81,37 @@ func TestDenseMatrixPredictorHighConcurrency(t *testing.T) {
 
 	wg.Wait()
 }
+
+func TestDenseMatrixPredictorUUIDAndHexHydration(t *testing.T) {
+	p := precog.NewDenseMatrixPredictor(&precog.DensePredictorConfig{
+		MaxRoutes: 128,
+	})
+
+	uuid := "123e4567-e89b-12d3-a456-426614174000"
+	p.Record("sess_uuid", "GET", "/orders/"+uuid, "")
+	p.Record("sess_uuid", "GET", "/orders/"+uuid+"/receipt", "")
+	p.Record("sess_uuid", "GET", "/orders/"+uuid, "")
+
+	preds := p.Predict("sess_uuid", 1)
+	if len(preds) == 0 {
+		t.Fatalf("expected predictions")
+	}
+	expectedCall := "GET /orders/" + uuid + "/receipt"
+	if preds[0].Call != expectedCall {
+		t.Errorf("expected hydrated UUID call %s, got %s", expectedCall, preds[0].Call)
+	}
+
+	hexID := "507f1f77bcf86cd799439011"
+	p.Record("sess_hex", "GET", "/items/"+hexID, "")
+	p.Record("sess_hex", "GET", "/items/"+hexID+"/details", "")
+	p.Record("sess_hex", "GET", "/items/"+hexID, "")
+
+	predsHex := p.Predict("sess_hex", 1)
+	if len(predsHex) == 0 {
+		t.Fatalf("expected predictions for hex")
+	}
+	expectedHexCall := "GET /items/" + hexID + "/details"
+	if predsHex[0].Call != expectedHexCall {
+		t.Errorf("expected hydrated Hex call %s, got %s", expectedHexCall, predsHex[0].Call)
+	}
+}

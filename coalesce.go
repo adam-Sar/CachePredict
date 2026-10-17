@@ -1,6 +1,7 @@
 package precog
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/cespare/xxhash/v2"
@@ -58,14 +59,32 @@ func (g *InflightGroup) Do(key string, fn func() (*ResponseEntry, error)) (*Resp
 	sh.calls[key] = c
 	sh.mu.Unlock()
 
-	// Execute actual query/handler exactly once
-	c.entry, c.err = fn()
+	var panicked bool
+	var panicVal any
 
-	// Notify all waiting callers and unregister
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				panicked = true
+				panicVal = r
+			}
+		}()
+		c.entry, c.err = fn()
+	}()
+
 	sh.mu.Lock()
 	delete(sh.calls, key)
 	sh.mu.Unlock()
 
+	if panicked {
+		c.err = fmt.Errorf("precog: coalesced handler panicked: %v", panicVal)
+	}
+
 	c.wg.Done()
+
+	if panicked {
+		panic(panicVal)
+	}
+
 	return c.entry, c.err
 }

@@ -108,3 +108,42 @@ func TestMiddlewareRequestCoalescingUnderLoad(t *testing.T) {
 		t.Fatalf("expected 1 DB call for coalesced in-flight requests, got %d", calls)
 	}
 }
+
+func TestInflightCoalescerPanicSafety(t *testing.T) {
+	g := precog.NewInflightGroup()
+	key := "panic_resource"
+
+	// First call panics
+	assertPanics := func() {
+		defer func() {
+			_ = recover()
+		}()
+		_, _ = g.Do(key, func() (*precog.ResponseEntry, error) {
+			panic("simulated upstream failure")
+		})
+	}
+	assertPanics()
+
+	// Subsequent call for the same key must NOT deadlock and must execute normally
+	done := make(chan bool, 1)
+	go func() {
+		entry, err := g.Do(key, func() (*precog.ResponseEntry, error) {
+			return &precog.ResponseEntry{
+				StatusCode:  200,
+				ContentType: "application/json",
+				Body:        []byte(`{"recovered":true}`),
+			}, nil
+		})
+		if err != nil || entry == nil || string(entry.Body) != `{"recovered":true}` {
+			t.Errorf("expected clean recovery on subsequent call, got err=%v entry=%v", err, entry)
+		}
+		done <- true
+	}()
+
+	select {
+	case <-done:
+		// Succeeded without deadlock!
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("deadlock detected: subsequent call hung after upstream panic")
+	}
+}
