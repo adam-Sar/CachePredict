@@ -1,10 +1,8 @@
 package precog
 
 import (
-	"bytes"
 	"crypto/rand"
 	"encoding/hex"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -41,15 +39,12 @@ func (e *Engine) Middleware(next http.Handler) http.Handler {
 		isSafe := method == "GET" || method == "HEAD"
 		hasAuth := r.Header.Get("Authorization") != ""
 
-		// Read body once for non-GET requests (if needed for cache key)
-		var bodyStr string
-		if !isSafe && r.Body != nil {
-			b, _ := io.ReadAll(r.Body)
-			bodyStr = string(b)
-			r.Body = io.NopCloser(bytes.NewReader(b))
+		// Cache keys only apply to safe methods. Non-safe methods are neither
+		// cached nor coalesced, so their bodies are never read or hashed.
+		var cacheKey string
+		if isSafe {
+			cacheKey = CanonicalCacheKey(method, r.URL.Path, r.URL.RawQuery, "")
 		}
-
-		cacheKey := CanonicalCacheKey(method, r.URL.Path, r.URL.RawQuery, bodyStr)
 
 		// 1. Check Cache for Safe Requests (skip shared cache lookup for unconfirmed auth requests)
 		if isSafe && cacheKey != "" && !hasAuth {
