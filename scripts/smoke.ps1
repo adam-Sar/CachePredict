@@ -26,12 +26,12 @@ function Check($name, $ok, $detail) {
 function Req($url, $method = "GET", $data = $null) {
     $hdrFile = [System.IO.Path]::GetTempFileName()
     $bodyFile = [System.IO.Path]::GetTempFileName()
-    $args = @("-s", "-S", "-D", $hdrFile, "-o", $bodyFile,
+    $curlArgs = @("-s", "-S", "-D", $hdrFile, "-o", $bodyFile,
         "-b", $jar, "-c", $jar, "-w", "%{http_code} %{time_total}", $url)
-    if ($method -eq "POST") { $args = @("-s", "-S", "-D", $hdrFile, "-o", $bodyFile,
+    if ($method -eq "POST") { $curlArgs = @("-s", "-S", "-D", $hdrFile, "-o", $bodyFile,
         "-b", $jar, "-c", $jar, "-X", "POST", "-d", $data, "-w", "%{http_code} %{time_total}", $url) }
 
-    $meta = & curl.exe @args
+    $meta = & curl.exe @curlArgs
     $parts = $meta.Trim().Split(" ")
     $headers = @{}
     foreach ($line in (Get-Content $hdrFile)) {

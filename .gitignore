@@ -37,3 +37,6 @@ precog.wasm
 
 # Demo application (not part of the package)
 demo/
+
+# A/B comparison playground (not part of the package)
+compare/

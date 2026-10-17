@@ -4,77 +4,16 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/adam-Sar/precog)](https://goreportcard.com/report/github.com/adam-Sar/precog)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Precog** is a universal, ultra-fast speculative API pre-warming and caching engine for Go. It predicts subsequent user actions in real-time, pre-cooks wire-ready HTTP responses, and delivers zero-latency ($0\text{ ms}$) client-side navigations using WebAssembly, Browser `CacheStorage`, and W3C Speculation Rules.
+**Precog** is a predictive caching middleware for Go. It caches API responses in a low-overhead in-memory store, coalesces concurrent duplicate requests, learns navigation patterns with a Markov predictor, and speculatively pre-warms the responses users are likely to need next — on the server and in the browser.
 
 ---
 
-## Highlights & Performance Architecture
+## What it does
 
-- ⚡ **Lock-Free Route Indexing (`EndpointRegistry`)**: Maps arbitrary dynamic URL routes (`GET /api/v1/items/:id`) to `uint16` IDs via lock-free atomic Copy-On-Write ($< 8.5\text{ ns}$ lookups).
-- 🔒 **Zero-GC 256-Shard Store (`BigCache` Architecture)**: Uses a pointer-free `map[uint64]uint32` index and contiguous byte ring buffers. Because the index contains zero pointers, the Go Garbage Collector completely skips it during STW and mark phases, preventing memory ballooning.
-- 🚀 **Two-Tier Caching (Atomic L1 + Sharded L2)**: Direct-mapped lock-free atomic L1 cache delivering **~7.0 ns** hits with **0 locks and 0 allocations**, backed by a 256-striped global L2 store.
-- 🌐 **WebAssembly Browser Predictor**: Runs the predictor directly in the user's browser via WebAssembly (`precog.wasm`), pre-fetching into native Browser `CacheStorage` (`window.caches`) for instant $0\text{ ms}$ navigations.
-- 🎯 **W3C Speculation Rules API**: Injects browser-native `<script type="speculationrules">` and HTTP `Link: <url>; rel=prefetch` headers for speculative Chromium pre-rendering.
-- 🧬 **Lock-Free Dense Contiguous Transition Matrix**: Replaces pointer-heavy Markov graphs with a flat 1D contiguous `uint32` array updated via atomic CPU instructions (`atomic.AddUint32`) with zero locks and zero allocations.
-- 🔑 **Fast xxHash64 Keying**: Sub-microsecond non-cryptographic 64-bit hashing replacing slow SHA-256.
-- 🧩 **100% Universal**: Drop-in middleware compatible with standard `net/http`, Echo, Chi, Gin, or any Go web framework.
-
----
-
-## Architectural Flow
-
-```
-+-----------------------------------------------------------------------------------+
-|                                 USER BROWSER                                      |
-|                                                                                   |
-|   User Navigation / Hover / Click                                                 |
-|          |                                                                        |
-|          v                                                                        |
-|   precog.js Interceptor  <====>  precog.wasm (Dense Predictor)                    |
-|          |                                                                        |
-|          +---> Browser CacheStorage (caches.open) ---> 0ms Instant Client Hit     |
-|          +---> W3C Speculation Rules (<script type="speculationrules">)           |
-+-----------------------------------------------------------------------------------+
-                                   |
-                      HTTP Request | (Network / Background Prefetch)
-                                   v
-+-----------------------------------------------------------------------------------+
-|                             GO BACKEND SERVER                                     |
-|                                                                                   |
-|  precog.Middleware()                                                              |
-|    |                                                                              |
-|    |---> 1. Fast xxHash64 Keying                                                  |
-|    |                                                                              |
-|    |---> 2. Tier 1 (L1): Lock-Free Direct-Mapped Atomic Cache  [ ~7.0 ns Hit ]    |
-|    |                                                                              |
-|    |---> 3. Tier 2 (L2): Zero-GC 256-Shard Byte Arena Store    [ ~200 ns Hit ]    |
-|    |                                                                              |
-|    |---> 4. On Hit: Cached Response Replay                                        |
-|    |                                                                              |
-|    +---> 5. On Miss: Execute Route Handler                                        |
-|              |                                                                    |
-|              +---> Lock-Free Dense Transition Matrix (atomic.AddUint32)           |
-|              +---> Speculative Background Pre-warming                             |
-+-----------------------------------------------------------------------------------+
-```
-
----
-
-## Benchmarks
-
-Micro-benchmarks run on Intel Core i7-1165G7 @ 2.80GHz:
-
-| Benchmark Component | Speed / Op | Allocations | Memory / Op |
-| :--- | :--- | :--- | :--- |
-| **TieredStore L1 Atomic Hit** | **5.12 ns/op** | **0 allocs/op** | **0 B/op** |
-| **EndpointRegistry Route Lookup** | **16.4 ns/op** | **0 allocs/op** | **0 B/op** |
-| **FastHash64 (Bare Path)** | **56.7 ns/op** | **0 allocs/op** | **0 B/op** |
-| **FastHash64 (Multi-Param Query)** | **310.7 ns/op** | **1 allocs/op** | **64 B/op** |
-| **ShardedStore Parallel Read (256 Shards)**| **84.3 ns/op** | **4 allocs/op** | **151 B/op** |
-| **Dense Matrix Predictor Query** | **849.2 ns/op** | **6 allocs/op** | **280 B/op** |
-| **Dense Matrix Lock-Free Record** | **547.2 ns/op** | **13 allocs/op** | **294 B/op** |
-
----
+- **Caches safe responses** (`GET`/`HEAD`) in a two-tier store: a lock-free direct-mapped L1 (atomic pointer slots, ~5 ns hits, zero allocations) backed by a pointer-free sharded byte-arena L2 (256 shards, no GC scanning of the index).
+- **Coalesces concurrent requests** for the same resource, so 50 simultaneous cache misses trigger exactly one handler execution (one database call).
+- **Predicts the next request** per session using a dense lock-free transition matrix and **pre-warms** predicted endpoints in background workers.
+- **Accelerates the browser**: serves an embedded client SDK (`precog.js`) that runs the same predictor as WebAssembly, pre-fetches into the browser's native `CacheStorage`, and injects W3C Speculation Rules.
 
 ## Installation
 
@@ -82,13 +21,7 @@ Micro-benchmarks run on Intel Core i7-1165G7 @ 2.80GHz:
 go get github.com/adam-Sar/precog
 ```
 
----
-
 ## Quick Start
-
-### 1. Backend Integration (`net/http`)
-
-Wrap your HTTP handler or router with `engine.Handler`:
 
 ```go
 package main
@@ -106,15 +39,9 @@ func main() {
 
 	mux.HandleFunc("/api/items", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"items": ["item1", "item2"]}`))
+		_, _ = w.Write([]byte(`{"items": ["item1", "item2"]}`))
 	})
 
-	mux.HandleFunc("/api/checkout", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"status": "ready"}`))
-	})
-
-	// Initialize Precog with default Zero-GC TieredStore and Dense Predictor
 	engine, err := precog.New(precog.Config{
 		TTL:                 5 * time.Minute,
 		ConfidenceThreshold: 0.60,
@@ -124,79 +51,90 @@ func main() {
 	}
 	defer engine.Close()
 
-	log.Println("Server running on :8080 with Precog predictive acceleration")
+	log.Println("Server running on :8080 with precog")
 	http.ListenAndServe(":8080", engine.Handler(mux))
 }
 ```
 
-### 2. Client-Side 0ms Browser Acceleration
+Wrap your router with `engine.Handler(mux)` — it works with `net/http`, Chi, Echo, Gin, or anything that speaks `http.Handler`.
 
-Precog automatically serves its embedded browser SDK at `/precog/precog.js`. Simply include the script in your HTML template:
+Responses carry an `X-Cache: HIT|MISS` header so you can observe what's happening.
 
-```html
-<!DOCTYPE html>
-<html>
-<head>
-    <title>My Fast App</title>
-    <!-- Automatically served by Precog backend -->
-    <script src="/precog/precog.js" defer></script>
-</head>
-<body>
-    <nav>
-        <a href="/api/items">Items</a>
-        <a href="/api/checkout">Checkout</a>
-    </nav>
-</body>
-</html>
-```
+## Caching policy
 
-`precog.js` will automatically:
-1. Auto-load the Dense Matrix Predictor from `/precog/precog.wasm` (Go runtime glue is served at `/precog/wasm_exec.js`; falls back to a lightweight JS tracker if the module is not deployed).
-2. Intercept link hovers and navigation.
-3. Predict upcoming API requests.
-4. Speculatively pre-warm them into the browser's native `CacheStorage`.
-5. Inject W3C Speculation Rules into the document head.
-6. Serve subsequent `fetch()` requests directly from browser cache with **0ms latency**.
+Precog only caches when it is safe to do so:
 
----
+- Only `GET`/`HEAD` requests are cached or coalesced; everything else passes straight through.
+- Only `200 OK` responses are stored.
+- Responses with `Set-Cookie` are never shared-cached (RFC 9111 §3.5).
+- `Cache-Control: no-store` and `private` are respected. Responses to authenticated requests (`Authorization` header) are only cached when the handler declares `Cache-Control: public`.
+- Original response headers (ETag, Content-Type, custom headers) are preserved on hits.
+- Predicted endpoints are advertised to browsers via `Link: <url>; rel=prefetch` headers.
 
-## Configuration Options
+## Sessions
+
+Precog tracks navigation per session to drive predictions. A session is resolved in this order:
+
+1. `SessionExtractor` from `Config`, if you provide one (e.g. read a JWT claim or custom header).
+2. The cookie named by `SessionCookieName` (default `precog_sid`, set automatically).
+3. The `X-Session-ID` request header.
+
+## Configuration
 
 ```go
 engine, err := precog.New(precog.Config{
-    // Minimum Markov confidence required to trigger background prefetch (0.0 - 1.0)
-    ConfidenceThreshold: 0.65,
+	// Minimum Markov confidence (0.0-1.0) to trigger background prefetch. Default: 0.65
+	ConfidenceThreshold: 0.65,
 
-    // Time-to-live for cached response entries
-    TTL: 5 * time.Minute,
+	// How long cached responses stay valid. Default: 60s
+	TTL: 5 * time.Minute,
 
-    // Custom backend store (defaults to Two-Tier L1 atomic + L2 ShardedStore)
-    Store: precog.NewTieredStore(precog.NewShardedStore(&precog.ShardedConfig{
-        NumShards:    256,
-        MaxCostBytes: 256 * 1024 * 1024, // 256 MB
-    })),
+	// Custom store backend. Default: two-tier L1 + sharded L2.
+	Store: precog.NewTieredStore(precog.NewShardedStore(&precog.ShardedConfig{
+		NumShards:    256,
+		MaxCostBytes: 256 * 1024 * 1024,
+	})),
 
-    // Custom predictor (defaults to lock-free DenseMatrixPredictor)
-    Predictor: precog.NewDenseMatrixPredictor(&precog.DensePredictorConfig{
-        MaxRoutes: 1024,
-    }),
+	// Custom predictor. Default: DenseMatrixPredictor (max 1024 routes).
+	Predictor: precog.NewDenseMatrixPredictor(&precog.DensePredictorConfig{
+		MaxRoutes: 1024,
+	}),
 
-    // Cookie name for tracking session navigation flows
-    SessionCookieName: "precog_sid",
+	// Cookie name for session tracking. Default: "precog_sid"
+	SessionCookieName: "precog_sid",
 
-    // Concurrency workers for server-side speculative hydrations
-    Workers: 8,
+	// Set the Secure flag on the session cookie (use behind HTTPS).
+	CookieSecure: true,
 
-    // Routes to exclude from predictive caching
-    SkipRoutes: []string{"/healthz", "/metrics", "/auth/login"},
+	// Override session resolution (e.g. from a JWT or custom header).
+	SessionExtractor: func(r *http.Request) string { return r.Header.Get("X-User") },
+
+	// Path prefixes never cached or prefetched.
+	SkipRoutes: []string{"/healthz", "/metrics", "/admin"},
+
+	// Concurrent speculative prefetch workers. Default: 4
+	Workers: 8,
 })
 ```
 
----
+## Browser SDK
 
-## Compiling WebAssembly
+Precog serves its client SDK at `/precog/precog.js`. Include it in your HTML:
 
-The client WebAssembly binary (`precog.wasm`) can be compiled using the included build scripts:
+```html
+<script src="/precog/precog.js" defer></script>
+```
+
+The SDK automatically:
+
+1. Loads the WebAssembly predictor from `/precog/precog.wasm` (the Go runtime glue at `/precog/wasm_exec.js` is served too; if the module isn't deployed, a lightweight JS tracker is used instead).
+2. Intercepts `fetch()` calls and link hovers to learn navigation patterns.
+3. Pre-fetches predicted URLs into the browser's `CacheStorage` for zero-latency repeat requests.
+4. Injects W3C Speculation Rules for Chromium-native prefetching.
+
+A minimal JS fallback predictor is exposed as `window.Precog.record/predict/clearCache`.
+
+## Compiling the WebAssembly module
 
 ```bash
 # Windows
@@ -206,22 +144,63 @@ The client WebAssembly binary (`precog.wasm`) can be compiled using the included
 ./build_wasm.sh
 ```
 
-When placed in the root directory, Precog serves `precog.wasm` at `/precog/precog.wasm` with `application/wasm` headers.
+Place the resulting `precog.wasm` in your server's working directory; Precog serves it at `/precog/precog.wasm` with the correct `application/wasm` content type.
 
----
+## Custom stores and predictors
 
-## Telemetry & Metrics
+Implement the `Store` interface to plug in your own backend (Redis, disk, etc.):
 
-Inspect real-time predictive cache metrics:
+```go
+type Store interface {
+	Get(key string) (*ResponseEntry, bool)
+	Set(key string, entry *ResponseEntry, ttl time.Duration) bool
+	Del(key string)
+	Close() error
+}
+```
+
+Built-in options: `NewTieredStore` (default), `NewShardedStore`, `NewMemoryStore`, `NewRistrettoStore` (TinyLFU eviction).
+
+Implement the `Predictor` interface for custom prediction logic. `NewAdaptiveMarkovPredictor` is a map-based alternative to the default dense matrix, and supports `SeedTransition(from, to, weight)` to bootstrap known flows:
+
+```go
+p := precog.NewAdaptiveMarkovPredictor()
+p.SeedTransition("GET /api/products/:id", "GET /api/cart", 10)
+```
+
+## Telemetry
 
 ```go
 stats := engine.Stats()
-fmt.Printf("Hit Rate: %.2f%%\n", stats.HitRate * 100)
-fmt.Printf("Prefetches Triggered: %d\n", stats.PrefetchesExecuted)
-fmt.Printf("Hits from Cache: %d\n", stats.CacheHits)
+fmt.Printf("Hit rate: %.2f%%\n", stats.HitRate*100)
+fmt.Printf("Prefetches executed: %d\n", stats.PrefetchesExecuted)
+fmt.Printf("Cache hits: %d / %d requests\n", stats.CacheHits, stats.TotalRequests)
 ```
 
----
+## Testing your integration
+
+The repo ships a self-contained instrumented server (`cmd/testserver`) with fake DB latency and handler-call counters, plus an end-to-end smoke suite:
+
+```bash
+go run ./cmd/testserver                # routes on :8099
+powershell -ExecutionPolicy Bypass -File scripts\smoke.ps1
+```
+
+The smoke suite asserts caching, pre-warming, coalescing, POST pass-through and Set-Cookie isolation over real HTTP — a useful template for verifying your own deployment.
+
+## Benchmarks
+
+Measured on an Intel Core i7-1165G7 @ 2.80GHz (`go test -bench . -benchmem`):
+
+| Benchmark Component | Speed / Op | Allocations | Memory / Op |
+| :--- | :--- | :--- | :--- |
+| **TieredStore L1 Atomic Hit** | **5.12 ns/op** | **0 allocs/op** | **0 B/op** |
+| **EndpointRegistry Route Lookup** | **16.4 ns/op** | **0 allocs/op** | **0 B/op** |
+| **FastHash64 (Bare Path)** | **56.7 ns/op** | **0 allocs/op** | **0 B/op** |
+| **FastHash64 (Multi-Param Query)** | **310.7 ns/op** | **1 allocs/op** | **64 B/op** |
+| **ShardedStore Parallel Read (256 Shards)**| **84.3 ns/op** | **4 allocs/op** | **151 B/op** |
+| **Dense Matrix Predictor Query** | **849.2 ns/op** | **6 allocs/op** | **280 B/op** |
+| **Dense Matrix Lock-Free Record** | **547.2 ns/op** | **13 allocs/op** | **294 B/op** |
 
 ## License
 
