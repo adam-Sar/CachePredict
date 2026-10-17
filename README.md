@@ -66,12 +66,13 @@ Micro-benchmarks run on Intel Core i7-1165G7 @ 2.80GHz:
 
 | Benchmark Component | Speed / Op | Allocations | Memory / Op |
 | :--- | :--- | :--- | :--- |
-| **TieredStore L1 Atomic Hit** | **7.08 ns/op** | **0 allocs/op** | **0 B/op** |
-| **EndpointRegistry Route Lookup** | **8.50 ns/op** | **0 allocs/op** | **0 B/op** |
-| **FastHash64 (Bare Path)** | **49.28 ns/op** | **1 allocs/op** | **48 B/op** |
-| **ShardedStore Parallel Read (256 Shards)**| **209.0 ns/op** | **5 allocs/op** | **295 B/op** |
-| **Dense Matrix Predictor Query** | **397.5 ns/op** | **5 allocs/op** | **248 B/op** |
-| **Dense Matrix Lock-Free Record** | **650.8 ns/op** | **13 allocs/op** | **294 B/op** |
+| **TieredStore L1 Atomic Hit** | **5.12 ns/op** | **0 allocs/op** | **0 B/op** |
+| **EndpointRegistry Route Lookup** | **16.4 ns/op** | **0 allocs/op** | **0 B/op** |
+| **FastHash64 (Bare Path)** | **56.7 ns/op** | **0 allocs/op** | **0 B/op** |
+| **FastHash64 (Multi-Param Query)** | **310.7 ns/op** | **1 allocs/op** | **64 B/op** |
+| **ShardedStore Parallel Read (256 Shards)**| **84.3 ns/op** | **4 allocs/op** | **151 B/op** |
+| **Dense Matrix Predictor Query** | **849.2 ns/op** | **6 allocs/op** | **280 B/op** |
+| **Dense Matrix Lock-Free Record** | **547.2 ns/op** | **13 allocs/op** | **294 B/op** |
 
 ---
 
@@ -150,11 +151,12 @@ Precog automatically serves its embedded browser SDK at `/precog/precog.js`. Sim
 ```
 
 `precog.js` will automatically:
-1. Intercept link hovers and navigation.
-2. Predict upcoming API requests.
-3. Speculatively pre-warm them into the browser's native `CacheStorage`.
-4. Inject W3C Speculation Rules into the document head.
-5. Serve subsequent `fetch()` requests directly from browser cache with **0ms latency**.
+1. Auto-load the Dense Matrix Predictor from `/precog/precog.wasm` (Go runtime glue is served at `/precog/wasm_exec.js`; falls back to a lightweight JS tracker if the module is not deployed).
+2. Intercept link hovers and navigation.
+3. Predict upcoming API requests.
+4. Speculatively pre-warm them into the browser's native `CacheStorage`.
+5. Inject W3C Speculation Rules into the document head.
+6. Serve subsequent `fetch()` requests directly from browser cache with **0ms latency**.
 
 ---
 
