@@ -1,6 +1,7 @@
 package precog_test
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 
@@ -77,5 +78,31 @@ func TestFastHash64(t *testing.T) {
 	}
 	if len(k1) != 16 {
 		t.Fatalf("expected 16-hex-char key, got len=%d (%s)", len(k1), k1)
+	}
+}
+
+func TestEndpointRegistryCapacityReturnsSentinel(t *testing.T) {
+	reg := precog.NewEndpointRegistry()
+
+	// Fill the registry to capacity
+	for i := 0; i < precog.MaxIndexedRoutes; i++ {
+		pattern := "GET /route/" + fmt.Sprintf("%d", i)
+		if id := reg.GetOrRegister(pattern); id == precog.InvalidRouteID {
+			t.Fatalf("unexpected sentinel before capacity at %d", i)
+		}
+	}
+
+	if reg.Count() != precog.MaxIndexedRoutes {
+		t.Fatalf("expected count %d, got %d", precog.MaxIndexedRoutes, reg.Count())
+	}
+
+	// Existing pattern must still resolve correctly at capacity
+	if reg.GetOrRegister("GET /route/0") != 0 {
+		t.Fatalf("existing pattern lookup broke at capacity")
+	}
+
+	// NEW pattern at capacity must return the sentinel, never an aliased existing ID
+	if id := reg.GetOrRegister("GET /overflow"); id != precog.InvalidRouteID {
+		t.Fatalf("expected InvalidRouteID sentinel at capacity, got %d", id)
 	}
 }

@@ -8,6 +8,10 @@ import (
 // MaxIndexedRoutes is the maximum number of distinct API endpoint patterns supported.
 const MaxIndexedRoutes = 4096
 
+// InvalidRouteID is returned by GetOrRegister when the registry is at capacity.
+// Callers must treat it as "no route" and skip modeling.
+const InvalidRouteID uint16 = 0xFFFF
+
 // EndpointRegistry maps normalized route patterns to compact uint16 identifiers.
 // Reads are lock-free via atomic.Value Copy-On-Write.
 type EndpointRegistry struct {
@@ -44,8 +48,8 @@ func (r *EndpointRegistry) GetOrRegister(pattern string) uint16 {
 	}
 
 	currentCount := uint16(r.count)
-	if currentCount >= MaxIndexedRoutes-1 {
-		return currentCount // Capped at max
+	if int(r.count) >= MaxIndexedRoutes {
+		return InvalidRouteID // At capacity: reject new patterns instead of aliasing
 	}
 
 	newID := currentCount

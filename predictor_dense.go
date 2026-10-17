@@ -97,7 +97,7 @@ func (p *DenseMatrixPredictor) Record(sessionID string, method, path, rawQuery s
 	pattern := NormalizeRoute(method, path)
 
 	toID := p.registry.GetOrRegister(pattern)
-	if uint32(toID) >= p.maxRoutes {
+	if toID == InvalidRouteID || uint32(toID) >= p.maxRoutes {
 		return
 	}
 
@@ -279,18 +279,14 @@ func (p *DenseMatrixPredictor) hydrateCall(candToID uint16, pattern string, last
 		}
 	}
 
-	// Carry forward query context if target has no query but reviews/item needs it
+	// Carry forward query context from a previously observed concrete call
 	if !strings.Contains(call, "?") {
-		if activeID != "" && (strings.Contains(call, "reviews") || strings.Contains(call, "review")) {
-			call += "?product_id=" + activeID
-		} else {
-			p.concreteMu.RLock()
-			known := p.concrete[candToID]
-			p.concreteMu.RUnlock()
-			if known != "" && strings.Contains(known, "?") {
-				qIdx := strings.Index(known, "?")
-				call += known[qIdx:]
-			}
+		p.concreteMu.RLock()
+		known := p.concrete[candToID]
+		p.concreteMu.RUnlock()
+		if known != "" && strings.Contains(known, "?") {
+			qIdx := strings.Index(known, "?")
+			call += known[qIdx:]
 		}
 	}
 
