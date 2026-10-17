@@ -1,9 +1,7 @@
 package precog
 
 import (
-	"bytes"
 	"encoding/binary"
-	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -17,8 +15,8 @@ const (
 	// DefaultMaxShardSize is 1 MB per shard = 256 MB total.
 	DefaultMaxShardSize = 1024 * 1024
 	// HeaderSize for binary entry serialization:
-	// expireNano(8) + keyHash(8) + statusCode(2) + contentTypeLen(2) + bodyLen(4) + wireLen(4) = 28 bytes
-	entryHeaderSize = 28
+	// expireNano(8) + keyHash(8) + statusCode(2) + contentTypeLen(2) + bodyLen(4) = 24 bytes
+	entryHeaderSize = 24
 )
 
 // ShardedConfig configures the ShardedStore.
@@ -80,21 +78,7 @@ func (s *ShardedStore) shardFor(h uint64) *cacheShard {
 	return s.shards[h%s.numShards]
 }
 
-// PreCookWireResponse serializes an HTTP response into a ready-to-stream wire format.
-func PreCookWireResponse(statusCode int, contentType string, body []byte) []byte {
-	statusText := http.StatusText(statusCode)
-	if statusText == "" {
-		statusText = "OK"
-	}
-	var buf bytes.Buffer
-	buf.Grow(160 + len(body))
-	fmt.Fprintf(&buf, "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %d\r\nX-Cache: HIT\r\nX-Precog: ram-cache\r\nConnection: keep-alive\r\n\r\n",
-		statusCode, statusText, contentType, len(body))
-	buf.Write(body)
-	return buf.Bytes()
-}
-
-// WriteResponse streams the response payload cleanly via standard HTTP ResponseWriter.
+// WriteResponse streams the cached response via the standard HTTP ResponseWriter.
 func (e *ResponseEntry) WriteResponse(w http.ResponseWriter) (int64, error) {
 	// Replay original response headers
 	for k, vv := range e.Header {
@@ -149,7 +133,6 @@ func (s *ShardedStore) GetByHash(h uint64) (*ResponseEntry, bool) {
 	statusCode := int(binary.LittleEndian.Uint16(sh.ring[offset+16 : offset+18]))
 	ctLen := int(binary.LittleEndian.Uint16(sh.ring[offset+18 : offset+20]))
 	bodyLen := int(binary.LittleEndian.Uint32(sh.ring[offset+20 : offset+24]))
-	wireLen := int(binary.LittleEndian.Uint32(sh.ring[offset+24 : offset+28]))
 
 	if storedHash != h {
 		return nil, false
@@ -161,7 +144,7 @@ func (s *ShardedStore) GetByHash(h uint64) (*ResponseEntry, bool) {
 	}
 
 	cursor := int(offset) + entryHeaderSize
-	if cursor+ctLen+bodyLen+wireLen > len(sh.ring) {
+	if cursor+ctLen+bodyLen > len(sh.ring) {
 		return nil, false
 	}
 
@@ -170,13 +153,6 @@ func (s *ShardedStore) GetByHash(h uint64) (*ResponseEntry, bool) {
 
 	body := make([]byte, bodyLen)
 	copy(body, sh.ring[cursor:cursor+bodyLen])
-	cursor += bodyLen
-
-	var wireBytes []byte
-	if wireLen > 0 {
-		wireBytes = make([]byte, wireLen)
-		copy(wireBytes, sh.ring[cursor:cursor+wireLen])
-	}
 
 	var expTime time.Time
 	if expireNano > 0 {
@@ -187,7 +163,6 @@ func (s *ShardedStore) GetByHash(h uint64) (*ResponseEntry, bool) {
 		StatusCode:  statusCode,
 		ContentType: contentType,
 		Body:        body,
-		WireBytes:   wireBytes,
 		CreatedAt:   time.Now(),
 		ExpiresAt:   expTime,
 	}
@@ -213,16 +188,11 @@ func (s *ShardedStore) SetByHash(h uint64, entry *ResponseEntry, ttl time.Durati
 		entry.ExpiresAt = time.Unix(0, expireNano)
 	}
 
-	wire := entry.WireBytes
-	if len(wire) == 0 && len(entry.Body) > 0 {
-		wire = PreCookWireResponse(entry.StatusCode, entry.ContentType, entry.Body)
-	}
 	ctBytes := []byte(entry.ContentType)
 	ctLen := len(ctBytes)
 	bodyLen := len(entry.Body)
-	wireLen := len(wire)
 
-	totalEntryLen := entryHeaderSize + ctLen + bodyLen + wireLen
+	totalEntryLen := entryHeaderSize + ctLen + bodyLen
 
 	sh := s.shardFor(h)
 	sh.mu.Lock()
@@ -252,14 +222,10 @@ func (s *ShardedStore) SetByHash(h uint64, entry *ResponseEntry, ttl time.Durati
 	binary.LittleEndian.PutUint16(hdr[16:18], uint16(entry.StatusCode))
 	binary.LittleEndian.PutUint16(hdr[18:20], uint16(ctLen))
 	binary.LittleEndian.PutUint32(hdr[20:24], uint32(bodyLen))
-	binary.LittleEndian.PutUint32(hdr[24:28], uint32(wireLen))
 
 	sh.ring = append(sh.ring, hdr[:]...)
 	sh.ring = append(sh.ring, ctBytes...)
 	sh.ring = append(sh.ring, entry.Body...)
-	if wireLen > 0 {
-		sh.ring = append(sh.ring, wire...)
-	}
 
 	sh.entries[h] = offset
 	return true

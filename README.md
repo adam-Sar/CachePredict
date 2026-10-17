@@ -15,7 +15,6 @@
 - 🚀 **Two-Tier Caching (Atomic L1 + Sharded L2)**: Direct-mapped lock-free atomic L1 cache delivering **~7.0 ns** hits with **0 locks and 0 allocations**, backed by a 256-striped global L2 store.
 - 🌐 **WebAssembly Browser Predictor**: Runs the predictor directly in the user's browser via WebAssembly (`precog.wasm`), pre-fetching into native Browser `CacheStorage` (`window.caches`) for instant $0\text{ ms}$ navigations.
 - 🎯 **W3C Speculation Rules API**: Injects browser-native `<script type="speculationrules">` and HTTP `Link: <url>; rel=prefetch` headers for speculative Chromium pre-rendering.
-- ⚡ **Pre-Cooked Wire Streaming**: Pre-serializes raw HTTP/1.1 wire frames in memory, enabling direct socket streaming bypassing HTTP framework overhead.
 - 🧬 **Lock-Free Dense Contiguous Transition Matrix**: Replaces pointer-heavy Markov graphs with a flat 1D contiguous `uint32` array updated via atomic CPU instructions (`atomic.AddUint32`) with zero locks and zero allocations.
 - 🔑 **Fast xxHash64 Keying**: Sub-microsecond non-cryptographic 64-bit hashing replacing slow SHA-256.
 - 🧩 **100% Universal**: Drop-in middleware compatible with standard `net/http`, Echo, Chi, Gin, or any Go web framework.
@@ -50,7 +49,7 @@
 |    |                                                                              |
 |    |---> 3. Tier 2 (L2): Zero-GC 256-Shard Byte Arena Store    [ ~200 ns Hit ]    |
 |    |                                                                              |
-|    |---> 4. On Hit: Direct Pre-Cooked Wire DMA Streaming                          |
+|    |---> 4. On Hit: Cached Response Replay                                        |
 |    |                                                                              |
 |    +---> 5. On Miss: Execute Route Handler                                        |
 |              |                                                                    |

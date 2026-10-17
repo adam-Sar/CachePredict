@@ -14,7 +14,6 @@ type ResponseEntry struct {
 	StatusCode  int
 	CreatedAt   time.Time
 	ExpiresAt   time.Time
-	WireBytes   []byte // Optional pre-cooked HTTP/1.1 wire representation
 }
 
 // Store defines the cache storage interface for Precog.

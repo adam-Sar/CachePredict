@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -44,12 +43,6 @@ func TestShardedStoreBasic(t *testing.T) {
 	}
 	if string(got.Body) != `{"greeting":"hello precog"}` {
 		t.Errorf("body mismatch: %s", string(got.Body))
-	}
-	if len(got.WireBytes) == 0 {
-		t.Errorf("expected pre-cooked wire bytes to be generated")
-	}
-	if !strings.Contains(string(got.WireBytes), "HTTP/1.1 200 OK") {
-		t.Errorf("expected pre-cooked wire bytes to contain HTTP/1.1 200 OK, got: %s", string(got.WireBytes))
 	}
 
 	// Test Deletion
@@ -130,7 +123,6 @@ func TestResponseEntryWriteResponse(t *testing.T) {
 		ContentType: "application/json",
 		Body:        []byte(`{"status":"precog_dma"}`),
 	}
-	entry.WireBytes = precog.PreCookWireResponse(entry.StatusCode, entry.ContentType, entry.Body)
 
 	rec := httptest.NewRecorder()
 	n, err := entry.WriteResponse(rec)
