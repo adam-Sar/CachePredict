@@ -178,6 +178,10 @@ func (p *Prefetcher) execute(job PrefetchJob) {
 			if strings.Contains(cc, "no-store") || strings.Contains(cc, "private") {
 				return nil, nil
 			}
+			// Responses with Set-Cookie must never be shared-cached (RFC 9111 §3.5)
+			if len(rec.Header().Values("Set-Cookie")) > 0 {
+				return nil, nil
+			}
 			// Authenticated responses must not be cached globally unless explicitly public
 			if job.AuthHeaders.Get("Authorization") != "" && !strings.Contains(cc, "public") {
 				return nil, nil

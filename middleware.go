@@ -101,8 +101,10 @@ func (e *Engine) Middleware(next http.Handler) http.Handler {
 					ExpiresAt:   time.Now().Add(e.config.TTL),
 				}
 
-				// Only cache safe responses according to RFC 9111
+				// Only cache safe responses according to RFC 9111.
+				// Responses with Set-Cookie must never be shared-cached (RFC 9111 §3.5).
 				canCache := rec.Code == http.StatusOK &&
+					len(rec.Header().Values("Set-Cookie")) == 0 &&
 					!strings.Contains(cc, "no-store") &&
 					!strings.Contains(cc, "private") &&
 					(!hasAuth || strings.Contains(cc, "public"))

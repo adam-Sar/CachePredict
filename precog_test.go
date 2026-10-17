@@ -350,3 +350,55 @@ func TestAuthenticatedRequestNotSharedInCache(t *testing.T) {
 	}
 }
 
+
+func TestSetCookieResponseNeverCached(t *testing.T) {
+	var handlerCalls int32
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/csrf", func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&handlerCalls, 1)
+		if n == 1 {
+			// Only User A (first request) receives the private cookie
+			http.SetCookie(w, &http.Cookie{Name: "csrf", Value: "SECRET-TOKEN-123"})
+		}
+		_, _ = w.Write([]byte(`ok`))
+	})
+
+	engine, err := precog.New(precog.Config{
+		TTL: 10 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("failed to init precog: %v", err)
+	}
+	defer engine.Close()
+
+	server := httptest.NewServer(engine.Handler(mux))
+	defer server.Close()
+
+	// User A: response sets a cookie and must NOT be cached
+	respA, err := http.Get(server.URL + "/csrf")
+	if err != nil {
+		t.Fatalf("User A request failed: %v", err)
+	}
+	respA.Body.Close()
+
+	// User B: must trigger a fresh MISS, not receive A's cookie from cache
+	respB, err := http.Get(server.URL + "/csrf")
+	if err != nil {
+		t.Fatalf("User B request failed: %v", err)
+	}
+	respB.Body.Close()
+
+	if respB.Header.Get("X-Cache") != "MISS" {
+		t.Errorf("expected X-Cache MISS for Set-Cookie response, got %s", respB.Header.Get("X-Cache"))
+	}
+	for _, c := range respB.Cookies() {
+		if c.Name == "csrf" {
+			t.Errorf("SECURITY LEAK: User B received User A's csrf cookie: %s=%s", c.Name, c.Value)
+		}
+	}
+	if atomic.LoadInt32(&handlerCalls) != 2 {
+		t.Errorf("expected handler to execute twice (no caching), got %d", atomic.LoadInt32(&handlerCalls))
+	}
+}
+
