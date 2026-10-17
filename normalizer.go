@@ -1,8 +1,6 @@
 package precog
 
 import (
-	"fmt"
-	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -18,6 +16,8 @@ var (
 	// Matches hex IDs (e.g. Mongo ObjectIDs)
 	hexIdRe = regexp.MustCompile(`/[0-9a-fA-F]{24}(/|$)`)
 )
+
+const hexDigits = "0123456789abcdef"
 
 // NormalizeRoute converts concrete request paths into parameterized route patterns.
 // Example: "GET /products/44" -> "GET /products/:id"
@@ -35,65 +35,50 @@ func NormalizeRoute(method, path string) string {
 	return m + " " + p
 }
 
-// FastHash64 computes a 64-bit non-cryptographic hash using xxHash.
+// FastHash64 computes a 64-bit non-cryptographic hash using xxHash with
+// zero allocations. Query parameters are canonicalized by sorting raw
+// "&"-delimited segments, so parameter order never affects the hash.
 func FastHash64(method, path, rawQuery, body string) uint64 {
 	method = strings.ToUpper(method)
 
-	var sb strings.Builder
-	sb.Grow(len(method) + len(path) + len(rawQuery) + len(body) + 16)
-	sb.WriteString(method)
-	sb.WriteString(" ")
-	sb.WriteString(path)
+	d := xxhash.New()
+	d.WriteString(method)
+	d.WriteString(" ")
+	d.WriteString(path)
 
 	if rawQuery != "" {
-		sb.WriteString("?")
+		d.WriteString("?")
 		if !strings.ContainsRune(rawQuery, '&') {
-			sb.WriteString(rawQuery)
+			d.WriteString(rawQuery)
 		} else {
-			sb.WriteString(SortQuery(rawQuery))
+			parts := strings.Split(rawQuery, "&")
+			sort.Strings(parts)
+			for i, p := range parts {
+				if i > 0 {
+					d.WriteString("&")
+				}
+				d.WriteString(p)
+			}
 		}
 	}
 
 	// For GET / HEAD, body is ignored
 	if body != "" && method != "GET" && method != "HEAD" {
-		sb.WriteString(" body=")
-		sb.WriteString(body)
+		d.WriteString(" body=")
+		d.WriteString(body)
 	}
 
-	return xxhash.Sum64String(sb.String())
+	return d.Sum64()
 }
 
 // CanonicalCacheKey computes a deterministic 16-character hexadecimal hash key.
 func CanonicalCacheKey(method, path, rawQuery, body string) string {
 	h := FastHash64(method, path, rawQuery, body)
-	return fmt.Sprintf("%016x", h)
-}
 
-// SortQuery takes a raw query string and returns it with keys sorted lexicographically.
-func SortQuery(rawQuery string) string {
-	rawQuery = strings.TrimPrefix(rawQuery, "?")
-	if rawQuery == "" {
-		return ""
+	var out [16]byte
+	for i := 15; i >= 0; i-- {
+		out[i] = hexDigits[h&0x0f]
+		h >>= 4
 	}
-
-	vals, err := url.ParseQuery(rawQuery)
-	if err != nil {
-		return rawQuery
-	}
-
-	keys := make([]string, 0, len(vals))
-	for k := range vals {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	var parts []string
-	for _, k := range keys {
-		v := vals[k]
-		sort.Strings(v)
-		for _, val := range v {
-			parts = append(parts, url.QueryEscape(k)+"="+url.QueryEscape(val))
-		}
-	}
-	return strings.Join(parts, "&")
+	return string(out[:])
 }
