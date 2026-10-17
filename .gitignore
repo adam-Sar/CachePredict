@@ -31,3 +31,9 @@ Thumbs.db
 node_modules/
 dist/
 out/
+
+# WASM build artifact (compile via build_wasm.bat / build_wasm.sh)
+precog.wasm
+
+# Demo application (not part of the package)
+demo/
