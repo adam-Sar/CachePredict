@@ -19,6 +19,32 @@
     caches.open(CACHE_NAME).then(c => { precogCache = c; });
   }
 
+  // Lazy-load the Go WASM predictor (runtime glue + module served by the backend).
+  // Silently falls back to the lightweight JS tracker if unavailable.
+  let wasmLoading = false;
+  async function loadWasmPredictor() {
+    if (window.PrecogWasm || wasmLoading || typeof WebAssembly === 'undefined') return;
+    wasmLoading = true;
+    try {
+      if (!window.Go) {
+        await new Promise((resolve, reject) => {
+          const s = document.createElement('script');
+          s.src = '/precog/wasm_exec.js';
+          s.onload = resolve;
+          s.onerror = reject;
+          document.head.appendChild(s);
+        });
+      }
+      if (!window.Go) return;
+      const go = new Go();
+      const result = await WebAssembly.instantiateStreaming(fetch('/precog/precog.wasm'), go.importObject);
+      await go.run(result.instance);
+    } catch (err) {
+      // WASM unavailable (not deployed or instantiation failed); JS fallback continues
+    }
+  }
+  loadWasmPredictor();
+
   // Lightweight in-browser transition tracker fallback before Wasm loads
   const fallbackTransitions = new Map();
   let lastRoute = null;

@@ -33,6 +33,19 @@ func TestClientAssetsAndTag(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "Precog") {
 		t.Errorf("expected body to contain Precog, got %s", rec.Body.String()[:100])
 	}
+
+	// Test serving the Go wasm runtime glue
+	reqGlue := httptest.NewRequest("GET", "/precog/wasm_exec.js", nil)
+	recGlue := httptest.NewRecorder()
+	if !precog.ServeClientAssets(recGlue, reqGlue) {
+		t.Fatalf("expected ServeClientAssets to handle /precog/wasm_exec.js")
+	}
+	if recGlue.Code != http.StatusOK || recGlue.Body.Len() == 0 {
+		t.Errorf("expected wasm_exec.js to be served, got status %d len %d", recGlue.Code, recGlue.Body.Len())
+	}
+	if !strings.Contains(recGlue.Body.String(), "Go") {
+		t.Errorf("expected wasm_exec.js glue content")
+	}
 }
 
 func TestBuildSpeculationRulesHeader(t *testing.T) {
