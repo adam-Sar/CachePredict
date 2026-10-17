@@ -11,7 +11,6 @@ type Stats struct {
 	CacheMisses        uint64  `json:"cache_misses"`
 	PrefetchesExecuted uint64  `json:"prefetches_executed"`
 	HitRate            float64 `json:"hit_rate"`
-	EstimatedSavedMs   float64 `json:"estimated_saved_ms"`
 }
 
 // Telemetry tracks cache efficiency and speculative accuracy atomically.
@@ -52,15 +51,11 @@ func (t *Telemetry) Stats() Stats {
 		hitRate = float64(hits) / float64(total)
 	}
 
-	// Assuming average backend database fetch is ~120ms vs 0.2ms RAM hit
-	savedMs := float64(hits) * 119.8
-
 	return Stats{
 		TotalRequests:      total,
 		CacheHits:          hits,
 		CacheMisses:        misses,
 		PrefetchesExecuted: prefetches,
 		HitRate:            hitRate,
-		EstimatedSavedMs:   savedMs,
 	}
 }
