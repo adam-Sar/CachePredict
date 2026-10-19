@@ -109,15 +109,19 @@
 
     for (const url of predictedUrls) {
       if (!url.startsWith('/') && !url.startsWith('http')) continue;
+      // Skip unhydrated route placeholders
+      if (url.includes(':id') || url.includes(':uuid') || url.includes(':hex')) continue;
       try {
         const has = await precogCache.match(url);
         if (!has) {
-          const resp = await fetch(url, {
+          // Use originalFetch to bypass interceptor and avoid overhead or recursive recording
+          const resp = await originalFetch(url, {
             headers: { 'X-Precog-Speculative': 'true' },
-            priority: 'low'
+            priority: 'low',
+            credentials: 'same-origin'
           });
           if (resp && resp.ok) {
-            await precogCache.put(url, resp);
+            await precogCache.put(url, resp.clone());
           }
         }
       } catch (err) {
@@ -131,6 +135,9 @@
     if (!HTMLScriptElement.supports || !HTMLScriptElement.supports('speculationrules')) {
       return;
     }
+    const validUrls = urls.filter(u => !u.includes(':id') && !u.includes(':uuid') && !u.includes(':hex'));
+    if (validUrls.length === 0) return;
+
     let script = document.getElementById('precog-speculation-rules');
     if (!script) {
       script = document.createElement('script');
@@ -142,7 +149,7 @@
       prefetch: [
         {
           source: 'list',
-          urls: urls,
+          urls: validUrls,
           eagerness: 'moderate'
         }
       ]
@@ -155,8 +162,14 @@
     const method = (init && init.method) ? init.method.toUpperCase() : 'GET';
     const url = typeof resource === 'string' ? resource : (resource && resource.url ? resource.url : '');
 
-    // Record interaction for real-time model training
-    if (url) {
+    // Check if this request is an internal speculative prefetch
+    const isSpec = init && init.headers && (
+      (init.headers['X-Precog-Speculative'] === 'true') ||
+      (typeof init.headers.get === 'function' && init.headers.get('X-Precog-Speculative') === 'true')
+    );
+
+    // Only record real user interactions for training; never record speculative background fetches
+    if (url && !isSpec) {
       record(method, url);
     }
 
@@ -183,10 +196,6 @@
     const resp = await originalFetch.apply(this, arguments);
 
     // If this was an explicit speculative prefetch, save into CacheStorage for instant retrieval
-    const isSpec = init && init.headers && (
-      (init.headers['X-Precog-Speculative'] === 'true') ||
-      (typeof init.headers.get === 'function' && init.headers.get('X-Precog-Speculative') === 'true')
-    );
     if (isSpec && precogCache && method === 'GET' && resp && resp.ok && url) {
       try {
         await precogCache.put(resource, resp.clone());
@@ -196,11 +205,32 @@
     return resp;
   };
 
-  // Intercept link clicks / hovers for predictive navigation
+  // Hover-intent listener with 65ms debounce to avoid triggering on cursor pass-through
+  let hoverTimer = null;
+  let hoveredAnchor = null;
+
   document.addEventListener('mouseover', (e) => {
     const a = e.target.closest('a');
-    if (a && a.href && a.origin === window.location.origin) {
+    if (!a || !a.href || a.origin !== window.location.origin) {
+      if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; }
+      hoveredAnchor = null;
+      return;
+    }
+    if (a === hoveredAnchor) return;
+    if (hoverTimer) clearTimeout(hoverTimer);
+
+    hoveredAnchor = a;
+    hoverTimer = setTimeout(() => {
       record('GET', a.pathname + a.search);
+      hoverTimer = null;
+    }, 65);
+  }, { passive: true });
+
+  document.addEventListener('mouseout', (e) => {
+    const a = e.target.closest('a');
+    if (a && a === hoveredAnchor) {
+      if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; }
+      hoveredAnchor = null;
     }
   }, { passive: true });
 
