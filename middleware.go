@@ -1,6 +1,7 @@
 package precog
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
@@ -80,7 +81,8 @@ func (e *Engine) Middleware(next http.Handler) http.Handler {
 				}
 
 				rec := httptest.NewRecorder()
-				next.ServeHTTP(rec, r)
+				detachedReq := r.WithContext(context.WithoutCancel(r.Context()))
+				next.ServeHTTP(rec, detachedReq)
 
 				respBody := rec.Body.Bytes()
 				contentType := rec.Header().Get("Content-Type")

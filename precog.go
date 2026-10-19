@@ -2,6 +2,7 @@ package precog
 
 import (
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -52,12 +53,13 @@ type Config struct {
 
 // Engine represents the active Precog predictive caching runtime.
 type Engine struct {
-	config     Config
-	store      Store
-	predictor  Predictor
-	prefetcher *Prefetcher
-	telemetry  *Telemetry
-	inflight   *InflightGroup
+	config       Config
+	store        Store
+	predictor    Predictor
+	prefetcher   *Prefetcher
+	prefetchOnce sync.Once
+	telemetry    *Telemetry
+	inflight     *InflightGroup
 }
 
 // New initializes the Precog SDK with the given configuration.
@@ -103,8 +105,8 @@ func New(cfg Config) (*Engine, error) {
 
 // Handler wraps the root HTTP handler with Precog predictive caching and registers it with the prefetcher.
 func (e *Engine) Handler(rootHandler http.Handler) http.Handler {
-	// Initialize prefetcher tied to this root handler
-	if e.prefetcher == nil {
+	// Initialize prefetcher tied to this root handler safely once
+	e.prefetchOnce.Do(func() {
 		e.prefetcher = NewPrefetcher(
 			rootHandler,
 			e.store,
@@ -117,7 +119,7 @@ func (e *Engine) Handler(rootHandler http.Handler) http.Handler {
 		e.prefetcher.SetOnWarmed(func(job PrefetchJob, key string, bytes int) {
 			e.telemetry.RecordPrefetch()
 		})
-	}
+	})
 	return e.Middleware(rootHandler)
 }
 
