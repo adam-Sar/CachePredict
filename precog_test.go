@@ -529,7 +529,6 @@ func TestCustomIsAuthenticatedConfig(t *testing.T) {
 	}
 }
 
-
 func TestSetCookieResponseNeverCached(t *testing.T) {
 	var handlerCalls int32
 
@@ -580,4 +579,3 @@ func TestSetCookieResponseNeverCached(t *testing.T) {
 		t.Errorf("expected handler to execute twice (no caching), got %d", atomic.LoadInt32(&handlerCalls))
 	}
 }
-

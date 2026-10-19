@@ -116,27 +116,27 @@ func (e *Engine) Middleware(next http.Handler) http.Handler {
 				return ent, nil
 			})
 
-		if err == nil && entry != nil {
-			// Record navigation and attach prefetch hints BEFORE the response
-			// is committed; headers added after WriteHeader are dropped by net/http.
-			if !isSpeculative {
-				e.predictor.Record(sid, method, r.URL.Path, r.URL.RawQuery)
-				e.triggerPrefetch(sid, r, w)
-			}
-
-			for k, vv := range entry.Header {
-				for _, v := range vv {
-					w.Header().Add(k, v)
+			if err == nil && entry != nil {
+				// Record navigation and attach prefetch hints BEFORE the response
+				// is committed; headers added after WriteHeader are dropped by net/http.
+				if !isSpeculative {
+					e.predictor.Record(sid, method, r.URL.Path, r.URL.RawQuery)
+					e.triggerPrefetch(sid, r, w)
 				}
+
+				for k, vv := range entry.Header {
+					for _, v := range vv {
+						w.Header().Add(k, v)
+					}
+				}
+				if entry.ContentType != "" && w.Header().Get("Content-Type") == "" {
+					w.Header().Set("Content-Type", entry.ContentType)
+				}
+				w.Header().Set("X-Cache", "MISS")
+				w.WriteHeader(entry.StatusCode)
+				_, _ = w.Write(entry.Body)
+				return
 			}
-			if entry.ContentType != "" && w.Header().Get("Content-Type") == "" {
-				w.Header().Set("Content-Type", entry.ContentType)
-			}
-			w.Header().Set("X-Cache", "MISS")
-			w.WriteHeader(entry.StatusCode)
-			_, _ = w.Write(entry.Body)
-			return
-		}
 		}
 
 		// Fallback for non-GET or un-coalesced requests

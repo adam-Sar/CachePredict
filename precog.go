@@ -1,3 +1,6 @@
+// Package precog provides predictive in-memory caching, concurrent request
+// coalescing, and speculative pre-warming middleware for Go HTTP web services
+// and modern browser applications.
 package precog
 
 import (

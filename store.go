@@ -24,7 +24,6 @@ type Store interface {
 	Close() error
 }
 
-
 // MemoryStore is a zero-dependency in-memory store suitable for testing.
 type MemoryStore struct {
 	mu    sync.RWMutex
