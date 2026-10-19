@@ -4,7 +4,7 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/adam-Sar/precog)](https://goreportcard.com/report/github.com/adam-Sar/precog)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Precog** is a predictive caching middleware for Go. It caches API responses in a low-overhead in-memory store, coalesces concurrent duplicate requests, learns navigation patterns with a Markov predictor, and speculatively pre-warms the responses users are likely to need next — on the server and in the browser.
+**Precog** is a predictive caching middleware for Go. It caches API responses in a low-overhead in-memory store, coalesces concurrent duplicate requests, learns navigation patterns with a Markov predictor, and speculatively pre-warms the responses users are likely to need next, both on the server and in the browser.
 
 ---
 
@@ -56,7 +56,7 @@ func main() {
 }
 ```
 
-Wrap your router with `engine.Handler(mux)` — it works with `net/http`, Chi, Echo, Gin, or anything that speaks `http.Handler`.
+Wrap your router with `engine.Handler(mux)`. It works with `net/http`, Chi, Echo, Gin, or anything that speaks `http.Handler`.
 
 Responses carry an `X-Cache: HIT|MISS` header so you can observe what's happening.
 

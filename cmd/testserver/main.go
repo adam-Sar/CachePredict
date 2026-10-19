@@ -18,7 +18,7 @@ import (
 	"github.com/adam-Sar/precog"
 )
 
-// Handler call counters — exposed via /stats so the smoke script can verify
+// Handler call counters: exposed via /stats so the smoke script can verify
 // that the upstream handler runs exactly when expected (never on cache hits,
 // once per coalesced burst).
 var (
