@@ -16,6 +16,7 @@ type PrefetchJob struct {
 	Prediction  Prediction
 	AuthHeaders http.Header
 	Cookies     []*http.Cookie
+	IsAuth      bool
 }
 
 // Prefetcher executes speculative API requests in the background to warm the cache.
@@ -31,6 +32,7 @@ type Prefetcher struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	onWarmed  func(job PrefetchJob, key string, bytes int)
+	isAuth    func(r *http.Request) bool
 	closeOnce sync.Once
 	closed    atomic.Bool
 }
@@ -65,16 +67,30 @@ func (p *Prefetcher) SetOnWarmed(fn func(job PrefetchJob, key string, bytes int)
 	p.onWarmed = fn
 }
 
+// SetAuthChecker registers a predicate function to identify authenticated requests.
+func (p *Prefetcher) SetAuthChecker(fn func(r *http.Request) bool) {
+	p.isAuth = fn
+}
+
 // Submit queues predictions that meet the confidence threshold for background warming.
 func (p *Prefetcher) Submit(sessionID string, preds []Prediction, origReq *http.Request) {
 	if p.handler == nil || p.closed.Load() || p.ctx.Err() != nil {
 		return
 	}
 
+	isAuth := false
+	if p.isAuth != nil {
+		isAuth = p.isAuth(origReq)
+	} else if origReq.Header.Get("Authorization") != "" || origReq.Header.Get("Proxy-Authorization") != "" {
+		isAuth = true
+	}
+
 	// Capture auth headers and cookies from the active session
 	headers := make(http.Header)
-	if auth := origReq.Header.Get("Authorization"); auth != "" {
-		headers.Set("Authorization", auth)
+	for _, h := range []string{"Authorization", "Proxy-Authorization", "X-Auth-Token", "X-API-Key"} {
+		if val := origReq.Header.Get(h); val != "" {
+			headers.Set(h, val)
+		}
 	}
 	if cookieHeader := origReq.Header.Get("Cookie"); cookieHeader != "" {
 		headers.Set("Cookie", cookieHeader)
@@ -96,6 +112,7 @@ func (p *Prefetcher) Submit(sessionID string, preds []Prediction, origReq *http.
 			Prediction:  pred,
 			AuthHeaders: headers,
 			Cookies:     cookies,
+			IsAuth:      isAuth,
 		}:
 		default:
 			// Queue full; drop speculative job to preserve resources
@@ -183,7 +200,8 @@ func (p *Prefetcher) execute(job PrefetchJob) {
 				return nil, nil
 			}
 			// Authenticated responses must not be cached globally unless explicitly public
-			if job.AuthHeaders.Get("Authorization") != "" && !strings.Contains(cc, "public") {
+			isAuth := job.IsAuth || job.AuthHeaders.Get("Authorization") != "" || job.AuthHeaders.Get("Proxy-Authorization") != ""
+			if isAuth && !strings.Contains(cc, "public") {
 				return nil, nil
 			}
 

@@ -37,7 +37,7 @@ func (e *Engine) Middleware(next http.Handler) http.Handler {
 
 		method := strings.ToUpper(r.Method)
 		isSafe := method == "GET" || method == "HEAD"
-		hasAuth := r.Header.Get("Authorization") != ""
+		isAuth := e.IsRequestAuthenticated(r)
 
 		// Cache keys only apply to safe methods. Non-safe methods are neither
 		// cached nor coalesced, so their bodies are never read or hashed.
@@ -47,19 +47,22 @@ func (e *Engine) Middleware(next http.Handler) http.Handler {
 		}
 
 		// 1. Check Cache for Safe Requests (skip shared cache lookup for unconfirmed auth requests)
-		if isSafe && cacheKey != "" && !hasAuth {
+		if isSafe && cacheKey != "" {
 			if entry, found := e.store.Get(cacheKey); found {
-				e.telemetry.RecordHit()
+				isPublic := strings.Contains(entry.Header.Get("Cache-Control"), "public")
+				if !isAuth || isPublic {
+					e.telemetry.RecordHit()
 
-				if !isSpeculative {
-					// Record navigation in predictor so next predictions continue
-					e.predictor.Record(sid, method, r.URL.Path, r.URL.RawQuery)
-					e.triggerPrefetch(sid, r, w)
+					if !isSpeculative {
+						// Record navigation in predictor so next predictions continue
+						e.predictor.Record(sid, method, r.URL.Path, r.URL.RawQuery)
+						e.triggerPrefetch(sid, r, w)
+					}
+
+					// Serve with headers preserved
+					_, _ = entry.WriteResponse(w)
+					return
 				}
-
-				// Serve with headers preserved
-				_, _ = entry.WriteResponse(w)
-				return
 			}
 		}
 
@@ -69,8 +72,9 @@ func (e *Engine) Middleware(next http.Handler) http.Handler {
 		if isSafe && cacheKey != "" && e.inflight != nil {
 			entry, err := e.inflight.Do(cacheKey, func() (*ResponseEntry, error) {
 				// Double-check cache in case prefetcher committed while we waited
-				if !hasAuth {
-					if cached, found := e.store.Get(cacheKey); found {
+				if cached, found := e.store.Get(cacheKey); found {
+					isPublic := strings.Contains(cached.Header.Get("Cache-Control"), "public")
+					if !isAuth || isPublic {
 						return cached, nil
 					}
 				}
@@ -102,7 +106,7 @@ func (e *Engine) Middleware(next http.Handler) http.Handler {
 					len(rec.Header().Values("Set-Cookie")) == 0 &&
 					!strings.Contains(cc, "no-store") &&
 					!strings.Contains(cc, "private") &&
-					(!hasAuth || strings.Contains(cc, "public"))
+					(!isAuth || strings.Contains(cc, "public"))
 
 				if canCache {
 					e.store.Set(cacheKey, ent, e.config.TTL)

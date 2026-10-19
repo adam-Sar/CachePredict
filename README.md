@@ -67,7 +67,7 @@ Precog only caches when it is safe to do so:
 - Only `GET`/`HEAD` requests are cached or coalesced; everything else passes straight through.
 - Only `200 OK` responses are stored.
 - Responses with `Set-Cookie` are never shared-cached (RFC 9111 §3.5).
-- `Cache-Control: no-store` and `private` are respected. Responses to authenticated requests (`Authorization` header) are only cached when the handler declares `Cache-Control: public`.
+- `Cache-Control: no-store` and `private` are respected. Responses to authenticated requests (`Authorization`, API tokens, or session cookies) are only cached when the handler explicitly declares `Cache-Control: public`.
 - Original response headers (ETag, Content-Type, custom headers) are preserved on hits.
 - Predicted endpoints are advertised to browsers via `Link: <url>; rel=prefetch` headers.
 
@@ -108,6 +108,18 @@ engine, err := precog.New(precog.Config{
 
 	// Override session resolution (e.g. from a JWT or custom header).
 	SessionExtractor: func(r *http.Request) string { return r.Header.Get("X-User") },
+
+	// Optional custom authentication detector. By default, requests with Authorization,
+	// Proxy-Authorization, API token headers, or cookies other than SessionCookieName
+	// are treated as authenticated and will not receive/populate shared cache without
+	// an explicit Cache-Control: public header.
+	IsAuthenticated: func(r *http.Request) bool {
+		return r.Header.Get("Authorization") != "" || r.Header.Get("X-User-Token") != ""
+	},
+
+	// Whitelist specific cookie names that represent authenticated sessions.
+	// If empty, any cookie other than SessionCookieName is considered an auth credential.
+	AuthCookieNames: []string{"session_id", "jwt"},
 
 	// Path prefixes never cached or prefetched.
 	SkipRoutes: []string{"/healthz", "/metrics", "/admin"},

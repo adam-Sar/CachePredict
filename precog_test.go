@@ -350,6 +350,185 @@ func TestAuthenticatedRequestNotSharedInCache(t *testing.T) {
 	}
 }
 
+func TestCookieAuthenticatedRequestNotSharedInCache(t *testing.T) {
+	var handlerCalls int32
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/dashboard", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&handlerCalls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		cookie, err := r.Cookie("session_token")
+		if err == nil && cookie.Value == "user_a_secret_session" {
+			_, _ = w.Write([]byte(`{"account":"Alice","balance":5000}`))
+		} else {
+			_, _ = w.Write([]byte(`{"account":"Guest","balance":0}`))
+		}
+	})
+
+	engine, err := precog.New(precog.Config{
+		TTL: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("failed to init precog: %v", err)
+	}
+	defer engine.Close()
+
+	server := httptest.NewServer(engine.Handler(mux))
+	defer server.Close()
+
+	client := server.Client()
+
+	// 1. User A (Alice) requests /api/dashboard with session_token cookie
+	reqA, _ := http.NewRequest("GET", server.URL+"/api/dashboard", nil)
+	reqA.AddCookie(&http.Cookie{Name: "session_token", Value: "user_a_secret_session"})
+	respA, err := client.Do(reqA)
+	if err != nil {
+		t.Fatalf("User A request failed: %v", err)
+	}
+	var dataA map[string]any
+	_ = json.NewDecoder(respA.Body).Decode(&dataA)
+	respA.Body.Close()
+	if dataA["account"] != "Alice" {
+		t.Fatalf("expected Alice account, got %v", dataA)
+	}
+
+	// 2. Anonymous visitor requests /api/dashboard - MUST NOT receive Alice's data from cache!
+	reqAnon, _ := http.NewRequest("GET", server.URL+"/api/dashboard", nil)
+	respAnon, err := client.Do(reqAnon)
+	if err != nil {
+		t.Fatalf("Anonymous request failed: %v", err)
+	}
+	var dataAnon map[string]any
+	_ = json.NewDecoder(respAnon.Body).Decode(&dataAnon)
+	respAnon.Body.Close()
+
+	if dataAnon["account"] == "Alice" {
+		t.Fatalf("SECURITY VIOLATION: Anonymous user received cached private data of Alice: %v", dataAnon)
+	}
+	if dataAnon["account"] != "Guest" {
+		t.Fatalf("expected Guest account, got %v", dataAnon)
+	}
+
+	// 3. User B (Bob) requests with a different cookie - MUST NOT receive Alice's data!
+	reqB, _ := http.NewRequest("GET", server.URL+"/api/dashboard", nil)
+	reqB.AddCookie(&http.Cookie{Name: "session_token", Value: "user_b_session"})
+	respB, err := client.Do(reqB)
+	if err != nil {
+		t.Fatalf("User B request failed: %v", err)
+	}
+	var dataB map[string]any
+	_ = json.NewDecoder(respB.Body).Decode(&dataB)
+	respB.Body.Close()
+
+	if dataB["account"] == "Alice" {
+		t.Fatalf("SECURITY VIOLATION: User B received cached private data of Alice: %v", dataB)
+	}
+}
+
+func TestAuthenticatedRequestWithPublicCacheControlCanBeShared(t *testing.T) {
+	var handlerCalls int32
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/catalog", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&handlerCalls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		// Explicit RFC 9111 public cache directive allows shared caching even for authenticated callers
+		w.Header().Set("Cache-Control", "public, max-age=300")
+		_, _ = w.Write([]byte(`{"items":["shoes","hat"]}`))
+	})
+
+	engine, err := precog.New(precog.Config{
+		TTL: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("failed to init precog: %v", err)
+	}
+	defer engine.Close()
+
+	server := httptest.NewServer(engine.Handler(mux))
+	defer server.Close()
+
+	client := server.Client()
+
+	// 1. Authenticated User A requests /api/catalog
+	reqA, _ := http.NewRequest("GET", server.URL+"/api/catalog", nil)
+	reqA.AddCookie(&http.Cookie{Name: "session_token", Value: "sess_a"})
+	respA, err := client.Do(reqA)
+	if err != nil {
+		t.Fatalf("reqA failed: %v", err)
+	}
+	respA.Body.Close()
+	if atomic.LoadInt32(&handlerCalls) != 1 {
+		t.Fatalf("expected 1 handler call, got %d", atomic.LoadInt32(&handlerCalls))
+	}
+
+	// 2. Authenticated User B requests /api/catalog - since response is public, it MUST hit cache
+	reqB, _ := http.NewRequest("GET", server.URL+"/api/catalog", nil)
+	reqB.AddCookie(&http.Cookie{Name: "session_token", Value: "sess_b"})
+	respB, err := client.Do(reqB)
+	if err != nil {
+		t.Fatalf("reqB failed: %v", err)
+	}
+	respB.Body.Close()
+
+	if respB.Header.Get("X-Cache") != "HIT" {
+		t.Errorf("expected X-Cache: HIT for public endpoint, got %s", respB.Header.Get("X-Cache"))
+	}
+	if atomic.LoadInt32(&handlerCalls) != 1 {
+		t.Errorf("expected handler calls to remain 1 on HIT, got %d", atomic.LoadInt32(&handlerCalls))
+	}
+}
+
+func TestCustomIsAuthenticatedConfig(t *testing.T) {
+	var handlerCalls int32
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/info", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&handlerCalls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"info":"public"}`))
+	})
+
+	engine, err := precog.New(precog.Config{
+		TTL: 5 * time.Second,
+		// Only treat requests with X-Special-Auth header as authenticated; allow cookie "theme" to be ignored
+		IsAuthenticated: func(r *http.Request) bool {
+			return r.Header.Get("X-Special-Auth") != ""
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to init precog: %v", err)
+	}
+	defer engine.Close()
+
+	server := httptest.NewServer(engine.Handler(mux))
+	defer server.Close()
+
+	client := server.Client()
+
+	// Request with "theme=dark" cookie is NOT considered authenticated due to custom IsAuthenticated
+	req1, _ := http.NewRequest("GET", server.URL+"/api/info", nil)
+	req1.AddCookie(&http.Cookie{Name: "theme", Value: "dark"})
+	resp1, err := client.Do(req1)
+	if err != nil {
+		t.Fatalf("req1 failed: %v", err)
+	}
+	resp1.Body.Close()
+
+	// 2nd request with "theme=dark" cookie hits cache
+	req2, _ := http.NewRequest("GET", server.URL+"/api/info", nil)
+	req2.AddCookie(&http.Cookie{Name: "theme", Value: "dark"})
+	resp2, err := client.Do(req2)
+	if err != nil {
+		t.Fatalf("req2 failed: %v", err)
+	}
+	resp2.Body.Close()
+
+	if resp2.Header.Get("X-Cache") != "HIT" {
+		t.Errorf("expected HIT for non-auth cookie under custom IsAuthenticated, got %s", resp2.Header.Get("X-Cache"))
+	}
+}
+
 
 func TestSetCookieResponseNeverCached(t *testing.T) {
 	var handlerCalls int32

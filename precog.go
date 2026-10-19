@@ -31,6 +31,17 @@ type Config struct {
 	// SessionExtractor optionally overrides session resolution (e.g. from JWT or custom header).
 	SessionExtractor func(r *http.Request) string
 
+	// IsAuthenticated optionally determines whether a request carries authentication credentials.
+	// Responses to authenticated requests will NOT be stored in the shared cache unless
+	// the response explicitly contains `Cache-Control: public`.
+	// If nil, requests with Authorization, Proxy-Authorization, token headers, or cookies
+	// other than SessionCookieName are treated as authenticated.
+	IsAuthenticated func(r *http.Request) bool
+
+	// AuthCookieNames is an optional list of cookie names that indicate an authenticated session.
+	// If empty, any cookie other than SessionCookieName is considered an auth credential.
+	AuthCookieNames []string
+
 	// SkipRoutes is a list of path prefixes that will never be cached or speculatively prefetched.
 	SkipRoutes []string
 
@@ -102,11 +113,55 @@ func (e *Engine) Handler(rootHandler http.Handler) http.Handler {
 			e.config.ConfidenceThreshold,
 			e.config.Workers,
 		)
+		e.prefetcher.SetAuthChecker(e.IsRequestAuthenticated)
 		e.prefetcher.SetOnWarmed(func(job PrefetchJob, key string, bytes int) {
 			e.telemetry.RecordPrefetch()
 		})
 	}
 	return e.Middleware(rootHandler)
+}
+
+// IsRequestAuthenticated determines whether an incoming HTTP request carries user authentication or credentials.
+func (e *Engine) IsRequestAuthenticated(r *http.Request) bool {
+	if e.config.IsAuthenticated != nil {
+		return e.config.IsAuthenticated(r)
+	}
+	return isDefaultAuthenticated(r, e.config.SessionCookieName, e.config.AuthCookieNames)
+}
+
+func isDefaultAuthenticated(r *http.Request, sessionCookieName string, authCookieNames []string) bool {
+	if r == nil {
+		return false
+	}
+	if r.Header.Get("Authorization") != "" || r.Header.Get("Proxy-Authorization") != "" {
+		return true
+	}
+	if r.Header.Get("X-Auth-Token") != "" || r.Header.Get("X-API-Key") != "" {
+		return true
+	}
+
+	cookies := r.Cookies()
+	if len(cookies) == 0 {
+		return false
+	}
+
+	if len(authCookieNames) > 0 {
+		for _, c := range cookies {
+			for _, name := range authCookieNames {
+				if c.Name == name && c.Value != "" {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	for _, c := range cookies {
+		if (sessionCookieName == "" || c.Name != sessionCookieName) && c.Value != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // Stats returns a snapshot of runtime metrics (hit rate, prefetches, latency saved).
