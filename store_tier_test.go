@@ -138,3 +138,47 @@ func TestTieredStoreNoTornReads(t *testing.T) {
 
 	wg.Wait()
 }
+
+func TestTieredStoreL2FallbackPreservesHeaders(t *testing.T) {
+	tiered := precog.NewTieredStore(precog.NewShardedStore(nil))
+	defer tiered.Close()
+
+	key := "target_key_with_headers"
+	hdr := make(http.Header)
+	hdr.Set("ETag", `"etag-tiered-999"`)
+	hdr.Set("X-Trace-ID", "trace-tiered-xyz")
+
+	entry := &precog.ResponseEntry{
+		StatusCode:  200,
+		ContentType: "application/json",
+		Header:      hdr,
+		Body:        []byte(`{"tiered":"ok"}`),
+	}
+
+	tiered.Set(key, entry, 5*time.Second)
+
+	// Flood L1 with 256 other keys to guarantee the original key is evicted from L1
+	for i := 0; i < 256; i++ {
+		k := fmt.Sprintf("evict_l1_key_%d", i)
+		tiered.Set(k, &precog.ResponseEntry{
+			StatusCode:  200,
+			ContentType: "text/plain",
+			Body:        []byte("filler"),
+		}, 5*time.Second)
+	}
+
+	// Now tiered.Get(key) must fall back to L2 and restore headers
+	got, found := tiered.Get(key)
+	if !found {
+		t.Fatalf("expected key to be found in L2 fallback")
+	}
+	if got.Header == nil {
+		t.Fatalf("expected Header map to be preserved from L2, got nil")
+	}
+	if got.Header.Get("ETag") != `"etag-tiered-999"` {
+		t.Errorf("expected ETag preserved from L2, got %s", got.Header.Get("ETag"))
+	}
+	if got.Header.Get("X-Trace-ID") != "trace-tiered-xyz" {
+		t.Errorf("expected X-Trace-ID preserved from L2, got %s", got.Header.Get("X-Trace-ID"))
+	}
+}

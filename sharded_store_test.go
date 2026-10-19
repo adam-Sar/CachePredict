@@ -142,3 +142,65 @@ func TestResponseEntryWriteResponse(t *testing.T) {
 		t.Errorf("body mismatch: %s", rec.Body.String())
 	}
 }
+
+func TestShardedStorePreservesHeaders(t *testing.T) {
+	store := precog.NewShardedStore(&precog.ShardedConfig{
+		NumShards: 8,
+	})
+	defer store.Close()
+
+	key := "headers_key"
+	hdr := make(http.Header)
+	hdr.Set("ETag", `"etag-123456789"`)
+	hdr.Set("X-Custom-Trace", "trace-xyz-abc")
+	hdr.Set("Access-Control-Allow-Origin", "*")
+	hdr.Add("Vary", "Accept-Encoding")
+	hdr.Add("Vary", "Origin")
+
+	entry := &precog.ResponseEntry{
+		StatusCode:  200,
+		ContentType: "application/json",
+		Header:      hdr,
+		Body:        []byte(`{"data":"headers_preserved"}`),
+	}
+
+	ok := store.Set(key, entry, 5*time.Second)
+	if !ok {
+		t.Fatalf("failed to set entry")
+	}
+
+	got, found := store.Get(key)
+	if !found {
+		t.Fatalf("entry not found")
+	}
+
+	if got.Header == nil {
+		t.Fatalf("expected Header map to be preserved, got nil")
+	}
+	if got.Header.Get("ETag") != `"etag-123456789"` {
+		t.Errorf("expected ETag preserved, got %s", got.Header.Get("ETag"))
+	}
+	if got.Header.Get("X-Custom-Trace") != "trace-xyz-abc" {
+		t.Errorf("expected X-Custom-Trace preserved, got %s", got.Header.Get("X-Custom-Trace"))
+	}
+	if got.Header.Get("Access-Control-Allow-Origin") != "*" {
+		t.Errorf("expected CORS preserved, got %s", got.Header.Get("Access-Control-Allow-Origin"))
+	}
+	varyVals := got.Header.Values("Vary")
+	if len(varyVals) != 2 || varyVals[0] != "Accept-Encoding" || varyVals[1] != "Origin" {
+		t.Errorf("expected multiple Vary values preserved, got %v", varyVals)
+	}
+
+	// Verify WriteResponse replays all preserved headers
+	rec := httptest.NewRecorder()
+	_, err := got.WriteResponse(rec)
+	if err != nil {
+		t.Fatalf("WriteResponse failed: %v", err)
+	}
+	if rec.Header().Get("ETag") != `"etag-123456789"` {
+		t.Errorf("WriteResponse missing ETag, got %s", rec.Header().Get("ETag"))
+	}
+	if rec.Header().Get("X-Custom-Trace") != "trace-xyz-abc" {
+		t.Errorf("WriteResponse missing X-Custom-Trace, got %s", rec.Header().Get("X-Custom-Trace"))
+	}
+}
