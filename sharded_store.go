@@ -3,6 +3,7 @@ package precog
 import (
 	"encoding/binary"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -80,8 +81,11 @@ func (s *ShardedStore) shardFor(h uint64) *cacheShard {
 
 // WriteResponse streams the cached response via the standard HTTP ResponseWriter.
 func (e *ResponseEntry) WriteResponse(w http.ResponseWriter) (int64, error) {
-	// Replay original response headers
+	// Replay original response headers (excluding internal precog metadata)
 	for k, vv := range e.Header {
+		if strings.HasPrefix(strings.ToLower(k), "x-precog-vary") {
+			continue
+		}
 		for _, v := range vv {
 			w.Header().Add(k, v)
 		}
@@ -155,6 +159,18 @@ func (s *ShardedStore) GetByHash(h uint64) (*ResponseEntry, bool) {
 	hdr := decodeHeaders(sh.ring[cursor : cursor+hdrLen])
 	cursor += hdrLen
 
+	// Reconstruct Vary map from internal headers if present
+	var varyMap map[string]string
+	for k, vv := range hdr {
+		if strings.HasPrefix(strings.ToLower(k), "x-precog-vary-") && len(vv) > 0 {
+			if varyMap == nil {
+				varyMap = make(map[string]string)
+			}
+			headerName := k[len("x-precog-vary-"):]
+			varyMap[headerName] = vv[0]
+		}
+	}
+
 	body := make([]byte, bodyLen)
 	copy(body, sh.ring[cursor:cursor+bodyLen])
 
@@ -170,6 +186,7 @@ func (s *ShardedStore) GetByHash(h uint64) (*ResponseEntry, bool) {
 		Body:        body,
 		CreatedAt:   time.Now(),
 		ExpiresAt:   expTime,
+		Vary:        varyMap,
 	}
 
 	return entry, true
@@ -191,6 +208,16 @@ func (s *ShardedStore) SetByHash(h uint64, entry *ResponseEntry, ttl time.Durati
 	if ttl > 0 {
 		expireNano = time.Now().Add(ttl).UnixNano()
 		entry.ExpiresAt = time.Unix(0, expireNano)
+	}
+
+	// Persist Vary map into headers for binary serialization
+	if len(entry.Vary) > 0 {
+		if entry.Header == nil {
+			entry.Header = make(http.Header)
+		}
+		for k, v := range entry.Vary {
+			entry.Header.Set("X-Precog-Vary-"+strings.ToLower(k), v)
+		}
 	}
 
 	ctBytes := []byte(entry.ContentType)

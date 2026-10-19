@@ -3,6 +3,8 @@ package precog_test
 import (
 	"crypto/sha256"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -128,4 +130,92 @@ func BenchmarkDenseMatrixPredictor_Predict(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		_ = p.Predict("sess_1", 3)
 	}
+}
+
+func BenchmarkHTTPMiddleware_CacheHit(b *testing.B) {
+	engine, err := precog.New(precog.Config{
+		TTL: time.Hour,
+	})
+	if err != nil {
+		b.Fatalf("failed to init engine: %v", err)
+	}
+	defer engine.Close()
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	wrapped := engine.Handler(handler)
+
+	// Prime cache
+	primeReq := httptest.NewRequest("GET", "/api/v1/bench", nil)
+	primeRec := httptest.NewRecorder()
+	wrapped.ServeHTTP(primeRec, primeReq)
+
+	req := httptest.NewRequest("GET", "/api/v1/bench", nil)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		rec := httptest.NewRecorder()
+		wrapped.ServeHTTP(rec, req)
+		if rec.Header().Get("X-Cache") != "HIT" {
+			b.Fatal("expected cache HIT")
+		}
+	}
+}
+
+func BenchmarkHTTPMiddleware_ParallelHits(b *testing.B) {
+	engine, err := precog.New(precog.Config{
+		TTL: time.Hour,
+	})
+	if err != nil {
+		b.Fatalf("failed to init engine: %v", err)
+	}
+	defer engine.Close()
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	wrapped := engine.Handler(handler)
+
+	// Prime cache
+	primeReq := httptest.NewRequest("GET", "/api/v1/bench", nil)
+	primeRec := httptest.NewRecorder()
+	wrapped.ServeHTTP(primeRec, primeReq)
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		req := httptest.NewRequest("GET", "/api/v1/bench", nil)
+		for pb.Next() {
+			rec := httptest.NewRecorder()
+			wrapped.ServeHTTP(rec, req)
+		}
+	})
+}
+
+func BenchmarkHTTPMiddleware_Coalescing(b *testing.B) {
+	engine, err := precog.New(precog.Config{
+		TTL: 10 * time.Millisecond,
+	})
+	if err != nil {
+		b.Fatalf("failed to init engine: %v", err)
+	}
+	defer engine.Close()
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * time.Millisecond) // Simulated fast DB query
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"coalesced":true}`))
+	})
+	wrapped := engine.Handler(handler)
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			req := httptest.NewRequest("GET", "/api/v1/coalesce", nil)
+			rec := httptest.NewRecorder()
+			wrapped.ServeHTTP(rec, req)
+		}
+	})
 }

@@ -71,9 +71,48 @@ func FastHash64(method, path, rawQuery, body string) uint64 {
 	return d.Sum64()
 }
 
-// CanonicalCacheKey computes a deterministic 16-character hexadecimal hash key.
-func CanonicalCacheKey(method, path, rawQuery, body string) string {
-	h := FastHash64(method, path, rawQuery, body)
+// FastHash64WithHost computes a 64-bit non-cryptographic hash including host,
+// path, canonicalized query parameters, and negotiated Vary values.
+func FastHash64WithHost(method, host, path, rawQuery string, varyVals ...string) uint64 {
+	method = strings.ToUpper(method)
+
+	d := xxhash.New()
+	d.WriteString(method)
+	d.WriteString(" ")
+	if host != "" {
+		d.WriteString(strings.ToLower(host))
+		d.WriteString(" ")
+	}
+	d.WriteString(path)
+
+	if rawQuery != "" {
+		d.WriteString("?")
+		if !strings.ContainsRune(rawQuery, '&') {
+			d.WriteString(rawQuery)
+		} else {
+			parts := strings.Split(rawQuery, "&")
+			sort.Strings(parts)
+			for i, p := range parts {
+				if i > 0 {
+					d.WriteString("&")
+				}
+				d.WriteString(p)
+			}
+		}
+	}
+
+	for _, v := range varyVals {
+		d.WriteString(" vary=")
+		d.WriteString(v)
+	}
+
+	return d.Sum64()
+}
+
+// CanonicalCacheKeyWithHost computes a deterministic 16-character hexadecimal hash key
+// incorporating the request host and any negotiated Vary header values.
+func CanonicalCacheKeyWithHost(method, host, path, rawQuery string, varyVals ...string) string {
+	h := FastHash64WithHost(method, host, path, rawQuery, varyVals...)
 
 	var out [16]byte
 	for i := 15; i >= 0; i-- {
@@ -81,4 +120,18 @@ func CanonicalCacheKey(method, path, rawQuery, body string) string {
 		h >>= 4
 	}
 	return string(out[:])
+}
+
+// CanonicalCacheKey computes a deterministic 16-character hexadecimal hash key.
+func CanonicalCacheKey(method, path, rawQuery, body string) string {
+	if body != "" && method != "GET" && method != "HEAD" {
+		h := FastHash64(method, path, rawQuery, body)
+		var out [16]byte
+		for i := 15; i >= 0; i-- {
+			out[i] = hexDigits[h&0x0f]
+			h >>= 4
+		}
+		return string(out[:])
+	}
+	return CanonicalCacheKeyWithHost(method, "", path, rawQuery)
 }

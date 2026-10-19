@@ -5,6 +5,7 @@ package precog
 
 import (
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -49,6 +50,25 @@ type Config struct {
 	// SkipRoutes is a list of path prefixes that will never be cached or speculatively prefetched.
 	SkipRoutes []string
 
+	// PublicRoutes is a list of path prefixes guaranteed to return public, non-personalized
+	// responses (e.g. "/api/catalog", "/api/products"). Requests to these routes may be
+	// shared-cached and coalesced even if authentication credentials are present.
+	PublicRoutes []string
+
+	// MaxResponseSize is the maximum response body size in bytes eligible for caching and buffering.
+	// Responses exceeding this limit bypass caching and stream directly to the client.
+	// Default: 2MB (2 * 1024 * 1024 bytes)
+	MaxResponseSize int64
+
+	// CoalesceAuthenticated controls whether requests carrying authentication credentials
+	// may be coalesced with identical concurrent requests for the exact same user identity.
+	// Default: false (authenticated requests bypass coalescing for strict security isolation).
+	CoalesceAuthenticated bool
+
+	// VaryHeaders is an optional list of request header names to evaluate for Vary negotiation
+	// if the response does not explicitly specify a Vary header.
+	VaryHeaders []string
+
 	// Workers is the number of concurrent speculative prefetch goroutines.
 	// Default: 4
 	Workers int
@@ -78,6 +98,9 @@ func New(cfg Config) (*Engine, error) {
 	}
 	if cfg.Workers <= 0 {
 		cfg.Workers = 4
+	}
+	if cfg.MaxResponseSize <= 0 {
+		cfg.MaxResponseSize = 2 * 1024 * 1024 // 2MB default buffer limit
 	}
 
 	// Initialize default store if not provided (two-tier L1/L2 sharded store)
@@ -124,6 +147,16 @@ func (e *Engine) Handler(rootHandler http.Handler) http.Handler {
 		})
 	})
 	return e.Middleware(rootHandler)
+}
+
+// isRoutePublic returns true if the request path matches a configured public route.
+func (e *Engine) isRoutePublic(path string) bool {
+	for _, pub := range e.config.PublicRoutes {
+		if strings.HasPrefix(path, pub) {
+			return true
+		}
+	}
+	return false
 }
 
 // IsRequestAuthenticated determines whether an incoming HTTP request carries user authentication or credentials.

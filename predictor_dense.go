@@ -152,8 +152,26 @@ func (p *DenseMatrixPredictor) Record(sessionID string, method, path, rawQuery s
 	if hasPrior && uint32(fromID) < p.maxRoutes {
 		idx := uint32(fromID)*p.maxRoutes + uint32(toID)
 		atomic.AddUint32(&p.matrix[idx], 1)
-		atomic.AddUint32(&p.totals[fromID], 1)
+		tot := atomic.AddUint32(&p.totals[fromID], 1)
+		if tot >= 0x7FFFFFFF {
+			p.rescaleRow(fromID)
+		}
 	}
+}
+
+// rescaleRow halves all transition counters in a row when totals approach uint32 saturation,
+// preserving relative Markov probability distributions without arithmetic overflow.
+func (p *DenseMatrixPredictor) rescaleRow(fromID uint16) {
+	rowStart := uint32(fromID) * p.maxRoutes
+	var newTotal uint32
+	for toID := uint32(0); toID < p.maxRoutes; toID++ {
+		idx := rowStart + toID
+		old := atomic.LoadUint32(&p.matrix[idx])
+		half := old / 2
+		atomic.StoreUint32(&p.matrix[idx], half)
+		newTotal += half
+	}
+	atomic.StoreUint32(&p.totals[fromID], newTotal)
 }
 
 type candidate struct {

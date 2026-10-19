@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  test:
+    name: Test & Verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        go-version: ['1.21', '1.22', '1.23']
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: true
+
+      - name: Verify dependencies
+        run: go mod verify
+
+      - name: Check code formatting
+        if: runner.os == 'Linux'
+        run: |
+          if [ -n "$(gofmt -l .)" ]; then
+            echo "Unformatted Go files detected:"
+            gofmt -l .
+            exit 1
+          fi
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run unit and security tests with race detector
+        run: go test -v -race ./...
+
+      - name: Run benchmarks
+        if: runner.os == 'Linux' && matrix.go-version == '1.23'
+        run: go test -run=^$ -bench=. -benchmem ./...
+
+      - name: Build WebAssembly client module
+        env:
+          GOOS: js
+          GOARCH: wasm
+        run: go build -v ./cmd/wasm
+
+      - name: Build test server binary
+        run: go build -v ./cmd/testserver

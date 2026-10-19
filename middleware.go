@@ -4,16 +4,19 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"time"
+
+	"github.com/cespare/xxhash/v2"
 )
 
-// Middleware returns a standard net/http middleware handler.
+// Middleware returns a standard net/http middleware handler with production-grade
+// predictive caching, security isolation, and RFC 9111 HTTP semantics compliance.
 func (e *Engine) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Automatically serve Precog browser SDK assets (/precog/precog.js & /precog/precog.wasm)
+		// 1. Automatically serve Precog browser SDK assets (/precog/precog.js & /precog/precog.wasm)
 		if ServeClientAssets(w, r) {
 			return
 		}
@@ -38,93 +41,197 @@ func (e *Engine) Middleware(next http.Handler) http.Handler {
 
 		method := strings.ToUpper(r.Method)
 		isSafe := method == "GET" || method == "HEAD"
-		isAuth := e.IsRequestAuthenticated(r)
 
-		// Cache keys only apply to safe methods. Non-safe methods are neither
-		// cached nor coalesced, so their bodies are never read or hashed.
-		var cacheKey string
-		if isSafe {
-			cacheKey = CanonicalCacheKey(method, r.URL.Path, r.URL.RawQuery, "")
+		// Non-safe methods (POST, PUT, DELETE, PATCH, etc.) pass straight through
+		if !isSafe {
+			w.Header().Set("X-Cache", "MISS")
+			next.ServeHTTP(w, r)
+			if !isSpeculative {
+				e.predictor.Record(sid, method, r.URL.Path, r.URL.RawQuery)
+			}
+			return
 		}
 
-		// 1. Check Cache for Safe Requests (skip shared cache lookup for unconfirmed auth requests)
-		if isSafe && cacheKey != "" {
-			if entry, found := e.store.Get(cacheKey); found {
-				isPublic := strings.Contains(entry.Header.Get("Cache-Control"), "public")
-				if !isAuth || isPublic {
-					e.telemetry.RecordHit()
+		// 2. Protocol & Streaming Bypass Checks:
+		// WebSockets, Server-Sent Events (SSE), and Range requests bypass caching and coalescing
+		isUpgrade := r.Header.Get("Upgrade") != ""
+		isSSE := strings.Contains(r.Header.Get("Accept"), "text/event-stream")
+		isRange := r.Header.Get("Range") != ""
 
-					if !isSpeculative {
-						// Record navigation in predictor so next predictions continue
-						e.predictor.Record(sid, method, r.URL.Path, r.URL.RawQuery)
-						e.triggerPrefetch(sid, r, w)
+		if isUpgrade || isSSE || isRange {
+			w.Header().Set("X-Cache", "MISS")
+			next.ServeHTTP(w, r)
+			if !isSpeculative {
+				e.predictor.Record(sid, method, r.URL.Path, r.URL.RawQuery)
+			}
+			return
+		}
+
+		// 3. Client Request Directives (RFC 9111 §5.2.1)
+		reqCC := r.Header.Get("Cache-Control")
+		isClientNoCache := strings.Contains(reqCC, "no-cache") ||
+			strings.Contains(reqCC, "max-age=0") ||
+			r.Header.Get("Pragma") == "no-cache"
+		isClientNoStore := strings.Contains(reqCC, "no-store")
+
+		// 4. Authentication and Route Classification
+		isExplicitPublic := e.isRoutePublic(r.URL.Path)
+		isAuth := e.IsRequestAuthenticated(r)
+
+		// 5. Host-aware Cache Key
+		host := r.Host
+		cacheKey := CanonicalCacheKeyWithHost(method, host, r.URL.Path, r.URL.RawQuery)
+
+		// 6. Cache Lookup (skip on client no-cache or client no-store)
+		if !isClientNoCache {
+			if entry, found := e.store.Get(cacheKey); found && entry != nil {
+				varyHeader := entry.Header.Get("Vary")
+				lookupEntry := entry
+				if varyHeader != "" && varyHeader != "*" {
+					vKey := varyKey(cacheKey, varyHeader, r)
+					if vKey != cacheKey {
+						if ve, ok := e.store.Get(vKey); ok && ve != nil {
+							lookupEntry = ve
+						}
 					}
+				}
 
-					// Serve with headers preserved
-					_, _ = entry.WriteResponse(w)
-					return
+				if lookupEntry.MatchesVary(r) {
+					isPublicResp := strings.Contains(lookupEntry.Header.Get("Cache-Control"), "public")
+					if !isAuth || isExplicitPublic || isPublicResp {
+						e.telemetry.RecordHit()
+
+						if !isSpeculative {
+							e.predictor.Record(sid, method, r.URL.Path, r.URL.RawQuery)
+							e.triggerPrefetch(sid, r, w)
+						}
+
+						_, _ = lookupEntry.WriteResponse(w)
+						return
+					}
 				}
 			}
 		}
 
-		// 2. Cache Miss: Coalesce in-flight requests to stop duplicate DB calls
+		// 7. Cache Miss: Record telemetry
 		e.telemetry.RecordMiss()
 
-		if isSafe && cacheKey != "" && e.inflight != nil {
-			entry, err := e.inflight.Do(cacheKey, func() (*ResponseEntry, error) {
-				// Double-check cache in case prefetcher committed while we waited
-				if cached, found := e.store.Get(cacheKey); found {
-					isPublic := strings.Contains(cached.Header.Get("Cache-Control"), "public")
-					if !isAuth || isPublic {
-						return cached, nil
+		// 8. Coalescing Security Boundary
+		// Only safe, unauthenticated (or explicitly public) requests are eligible for shared coalescing.
+		// Authenticated requests NEVER coalesce across different users/sessions by default.
+		canCoalesce := !isClientNoCache && !isClientNoStore && (isExplicitPublic || (!isAuth && len(r.Cookies()) == 0))
+		var coalesceKey string
+
+		if canCoalesce {
+			coalesceKey = cacheKey
+		} else if isAuth && e.config.CoalesceAuthenticated {
+			// Per-user isolated coalescing only if explicitly enabled
+			coalesceKey = cacheKey + ":user:" + sid
+		}
+
+		// 9. Coalesced Path
+		if coalesceKey != "" && e.inflight != nil {
+			var isLeader bool
+			var leaderEntry *ResponseEntry
+			var leaderRecorder *capturingResponseWriter
+
+			entry, err := e.inflight.DoContext(r.Context(), coalesceKey, func() (*ResponseEntry, error) {
+				isLeader = true
+
+				// Double-check cache in case a prefetcher committed while we waited
+				if cached, found := e.store.Get(cacheKey); found && cached != nil {
+					varyHeader := cached.Header.Get("Vary")
+					lookupCached := cached
+					if varyHeader != "" && varyHeader != "*" {
+						vKey := varyKey(cacheKey, varyHeader, r)
+						if vKey != cacheKey {
+							if ve, ok := e.store.Get(vKey); ok && ve != nil {
+								lookupCached = ve
+							}
+						}
+					}
+					if lookupCached.MatchesVary(r) {
+						isPublicResp := strings.Contains(lookupCached.Header.Get("Cache-Control"), "public")
+						if !isAuth || isExplicitPublic || isPublicResp {
+							return lookupCached, nil
+						}
 					}
 				}
 
-				rec := httptest.NewRecorder()
+				rec := newCapturingResponseWriter(w, e.config.MaxResponseSize)
+				leaderRecorder = rec
+
 				detachedReq := r.WithContext(context.WithoutCancel(r.Context()))
 				next.ServeHTTP(rec, detachedReq)
 
-				respBody := rec.Body.Bytes()
+				// If response streamed or overflowed, the leader already flushed to its client
+				if rec.streaming || rec.overflow {
+					return nil, ErrStreamingResponse
+				}
+
+				respBody := rec.BodyBytes()
 				contentType := rec.Header().Get("Content-Type")
 				cc := rec.Header().Get("Cache-Control")
+				varyHeader := rec.Header().Get("Vary")
 
 				hdr := make(http.Header)
 				for k, vv := range rec.Header() {
 					hdr[k] = append([]string(nil), vv...)
 				}
 
+				varyMap := extractVaryMap(r, varyHeader)
+
 				ent := &ResponseEntry{
 					Body:        respBody,
 					Header:      hdr,
 					ContentType: contentType,
-					StatusCode:  rec.Code,
+					StatusCode:  rec.StatusCode(),
 					CreatedAt:   time.Now(),
 					ExpiresAt:   time.Now().Add(e.config.TTL),
+					Vary:        varyMap,
 				}
+				leaderEntry = ent
 
-				// Only cache safe responses according to RFC 9111.
-				// Responses with Set-Cookie must never be shared-cached (RFC 9111 §3.5).
-				canCache := rec.Code == http.StatusOK &&
+				// Evaluate RFC 9111 cacheability
+				canCache := rec.StatusCode() == http.StatusOK &&
 					len(rec.Header().Values("Set-Cookie")) == 0 &&
 					!strings.Contains(cc, "no-store") &&
 					!strings.Contains(cc, "private") &&
-					(!isAuth || strings.Contains(cc, "public"))
+					varyHeader != "*" &&
+					(!isAuth || isExplicitPublic || strings.Contains(cc, "public"))
 
-				if canCache {
+				if canCache && !isClientNoStore {
 					e.store.Set(cacheKey, ent, e.config.TTL)
+					if varyHeader != "" && varyHeader != "*" {
+						vKey := varyKey(cacheKey, varyHeader, r)
+						e.store.Set(vKey, ent, e.config.TTL)
+					}
+					return ent, nil // Safe to share with waiting followers
 				}
-				return ent, nil
+
+				// Response is private, set-cookie, or uncacheable: DO NOT share with followers!
+				return nil, ErrNotShareable
 			})
 
+			// If this goroutine was the leader and it already streamed to w, it is finished
+			if isLeader && leaderRecorder != nil && (leaderRecorder.streaming || leaderRecorder.overflow) {
+				if !isSpeculative {
+					e.predictor.Record(sid, method, r.URL.Path, r.URL.RawQuery)
+				}
+				return
+			}
+
+			// Case A: Leader or Follower received a shared, cacheable entry
 			if err == nil && entry != nil {
-				// Record navigation and attach prefetch hints BEFORE the response
-				// is committed; headers added after WriteHeader are dropped by net/http.
 				if !isSpeculative {
 					e.predictor.Record(sid, method, r.URL.Path, r.URL.RawQuery)
 					e.triggerPrefetch(sid, r, w)
 				}
 
 				for k, vv := range entry.Header {
+					if strings.HasPrefix(strings.ToLower(k), "x-precog-vary") {
+						continue
+					}
 					for _, v := range vv {
 						w.Header().Add(k, v)
 					}
@@ -137,18 +244,144 @@ func (e *Engine) Middleware(next http.Handler) http.Handler {
 				_, _ = w.Write(entry.Body)
 				return
 			}
+
+			// Case B: Leader produced a private / unshareable response
+			// Leader serves its own response to its own client
+			if isLeader && leaderEntry != nil && leaderRecorder != nil && !leaderRecorder.headerWritten {
+				if !isSpeculative {
+					e.predictor.Record(sid, method, r.URL.Path, r.URL.RawQuery)
+					if isSafe {
+						e.triggerPrefetch(sid, r, w)
+					}
+				}
+				for k, vv := range leaderEntry.Header {
+					if strings.HasPrefix(strings.ToLower(k), "x-precog-vary") {
+						continue
+					}
+					for _, v := range vv {
+						w.Header().Add(k, v)
+					}
+				}
+				w.Header().Set("X-Cache", "MISS")
+				w.WriteHeader(leaderEntry.StatusCode)
+				_, _ = w.Write(leaderEntry.Body)
+				return
+			}
+
+			// Case C: Waiting followers who were unblocked with ErrNotShareable or ErrStreamingResponse:
+			// Fall through to execute upstream fresh for their own connection.
 		}
 
-		// Fallback for non-GET or un-coalesced requests
-		w.Header().Set("X-Cache", "MISS")
-		next.ServeHTTP(w, r)
+		// 10. Direct Passthrough / Uncoalesced Execution
+		rec := newCapturingResponseWriter(w, e.config.MaxResponseSize)
+		next.ServeHTTP(rec, r)
+
+		// If streaming or already committed, finish
+		if rec.streaming || rec.overflow {
+			if !isSpeculative {
+				e.predictor.Record(sid, method, r.URL.Path, r.URL.RawQuery)
+			}
+			return
+		}
+
+		respBody := rec.BodyBytes()
+		contentType := rec.Header().Get("Content-Type")
+		cc := rec.Header().Get("Cache-Control")
+		varyHeader := rec.Header().Get("Vary")
+
+		hdr := make(http.Header)
+		for k, vv := range rec.Header() {
+			hdr[k] = append([]string(nil), vv...)
+		}
+
+		canCache := rec.StatusCode() == http.StatusOK &&
+			len(rec.Header().Values("Set-Cookie")) == 0 &&
+			!strings.Contains(cc, "no-store") &&
+			!strings.Contains(cc, "private") &&
+			varyHeader != "*" &&
+			(!isAuth || isExplicitPublic || strings.Contains(cc, "public"))
+
+		if canCache && !isClientNoStore {
+			varyMap := extractVaryMap(r, varyHeader)
+			ent := &ResponseEntry{
+				Body:        respBody,
+				Header:      hdr,
+				ContentType: contentType,
+				StatusCode:  rec.StatusCode(),
+				CreatedAt:   time.Now(),
+				ExpiresAt:   time.Now().Add(e.config.TTL),
+				Vary:        varyMap,
+			}
+			e.store.Set(cacheKey, ent, e.config.TTL)
+			if varyHeader != "" && varyHeader != "*" {
+				vKey := varyKey(cacheKey, varyHeader, r)
+				e.store.Set(vKey, ent, e.config.TTL)
+			}
+		}
+
 		if !isSpeculative {
 			e.predictor.Record(sid, method, r.URL.Path, r.URL.RawQuery)
 			if isSafe {
 				e.triggerPrefetch(sid, r, w)
 			}
 		}
+
+		for k, vv := range hdr {
+			if strings.HasPrefix(strings.ToLower(k), "x-precog-vary") {
+				continue
+			}
+			for _, v := range vv {
+				w.Header().Add(k, v)
+			}
+		}
+		if contentType != "" && w.Header().Get("Content-Type") == "" {
+			w.Header().Set("Content-Type", contentType)
+		}
+		w.Header().Set("X-Cache", "MISS")
+		w.WriteHeader(rec.StatusCode())
+		_, _ = w.Write(respBody)
 	})
+}
+
+func varySignature(varyHeader string, r *http.Request) string {
+	parts := strings.Split(varyHeader, ",")
+	var b strings.Builder
+	for i, p := range parts {
+		h := strings.TrimSpace(p)
+		if h != "" {
+			if i > 0 {
+				b.WriteString("&")
+			}
+			b.WriteString(strings.ToLower(h))
+			b.WriteString("=")
+			b.WriteString(r.Header.Get(h))
+		}
+	}
+	return b.String()
+}
+
+func varyKey(primaryKey string, varyHeader string, r *http.Request) string {
+	if varyHeader == "" || varyHeader == "*" {
+		return primaryKey
+	}
+	sig := varySignature(varyHeader, r)
+	h := xxhash.Sum64String(sig)
+	return fmt.Sprintf("%s_v%x", primaryKey, h)
+}
+
+func extractVaryMap(r *http.Request, varyHeader string) map[string]string {
+	if varyHeader == "" || varyHeader == "*" {
+		return nil
+	}
+	parts := strings.Split(varyHeader, ",")
+	m := make(map[string]string, len(parts))
+	for _, p := range parts {
+		name := strings.TrimSpace(p)
+		if name != "" {
+			m[name] = r.Header.Get(name)
+		}
+	}
+	return m
 }
 
 func (e *Engine) triggerPrefetch(sid string, r *http.Request, w http.ResponseWriter) {

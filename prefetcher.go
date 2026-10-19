@@ -14,6 +14,7 @@ import (
 type PrefetchJob struct {
 	SessionID   string
 	Prediction  Prediction
+	Host        string
 	AuthHeaders http.Header
 	Cookies     []*http.Cookie
 	IsAuth      bool
@@ -97,6 +98,11 @@ func (p *Prefetcher) Submit(sessionID string, preds []Prediction, origReq *http.
 	}
 	cookies := origReq.Cookies()
 
+	var host string
+	if origReq != nil {
+		host = origReq.Host
+	}
+
 	for _, pred := range preds {
 		if pred.Probability < p.threshold {
 			continue
@@ -110,6 +116,7 @@ func (p *Prefetcher) Submit(sessionID string, preds []Prediction, origReq *http.
 		case p.jobChan <- PrefetchJob{
 			SessionID:   sessionID,
 			Prediction:  pred,
+			Host:        host,
 			AuthHeaders: headers,
 			Cookies:     cookies,
 			IsAuth:      isAuth,
@@ -161,7 +168,7 @@ func (p *Prefetcher) execute(job PrefetchJob) {
 		rawQuery = targetURI[qIdx+1:]
 	}
 
-	cacheKey := CanonicalCacheKey(method, targetPath, rawQuery, "")
+	cacheKey := CanonicalCacheKeyWithHost(method, job.Host, targetPath, rawQuery)
 	// If already in RAM, avoid redundant compute
 	if _, exists := p.store.Get(cacheKey); exists {
 		return
@@ -178,6 +185,10 @@ func (p *Prefetcher) execute(job PrefetchJob) {
 		defer reqCancel()
 
 		syntheticReq := httptest.NewRequest(method, targetURI, nil).WithContext(reqCtx)
+		if job.Host != "" {
+			syntheticReq.Host = job.Host
+			syntheticReq.URL.Host = job.Host
+		}
 		for k, v := range job.AuthHeaders {
 			syntheticReq.Header[k] = v
 		}
@@ -204,6 +215,11 @@ func (p *Prefetcher) execute(job PrefetchJob) {
 			if len(rec.Header().Values("Set-Cookie")) > 0 {
 				return nil, nil
 			}
+			// Responses with Vary: * must never be cached (RFC 9111 §4.1)
+			varyHeader := rec.Header().Get("Vary")
+			if varyHeader == "*" {
+				return nil, nil
+			}
 			// Authenticated responses must not be cached globally unless explicitly public
 			isAuth := job.IsAuth || job.AuthHeaders.Get("Authorization") != "" || job.AuthHeaders.Get("Proxy-Authorization") != ""
 			if isAuth && !strings.Contains(cc, "public") {
@@ -225,6 +241,7 @@ func (p *Prefetcher) execute(job PrefetchJob) {
 				StatusCode:  rec.Code,
 				CreatedAt:   time.Now(),
 				ExpiresAt:   time.Now().Add(p.ttl),
+				Vary:        extractVaryMap(syntheticReq, varyHeader),
 			}
 			p.store.Set(cacheKey, entry, p.ttl)
 			if p.onWarmed != nil {

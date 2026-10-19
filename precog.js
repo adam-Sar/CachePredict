@@ -121,7 +121,11 @@
             credentials: 'same-origin'
           });
           if (resp && resp.ok) {
-            await precogCache.put(url, resp.clone());
+            const cc = (resp.headers.get('Cache-Control') || '').toLowerCase();
+            // Strictly enforce RFC 9111 cacheability in browser CacheStorage
+            if (!cc.includes('no-store') && !cc.includes('private') && !resp.headers.has('Set-Cookie')) {
+              await precogCache.put(url, resp.clone());
+            }
           }
         }
       } catch (err) {
@@ -196,10 +200,14 @@
     const resp = await originalFetch.apply(this, arguments);
 
     // If this was an explicit speculative prefetch, save into CacheStorage for instant retrieval
+    // strictly only when response is public/cacheable and has no Set-Cookie
     if (isSpec && precogCache && method === 'GET' && resp && resp.ok && url) {
-      try {
-        await precogCache.put(resource, resp.clone());
-      } catch (err) {}
+      const cc = (resp.headers.get('Cache-Control') || '').toLowerCase();
+      if (!cc.includes('no-store') && !cc.includes('private') && !resp.headers.has('Set-Cookie')) {
+        try {
+          await precogCache.put(resource, resp.clone());
+        } catch (err) {}
+      }
     }
 
     return resp;
@@ -214,6 +222,10 @@
     if (!a || !a.href || a.origin !== window.location.origin) {
       if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; }
       hoveredAnchor = null;
+      return;
+    }
+    // Respect opt-out attributes and nofollow links
+    if (a.hasAttribute('data-precog-skip') || a.getAttribute('rel') === 'nofollow') {
       return;
     }
     if (a === hoveredAnchor) return;
@@ -243,7 +255,19 @@
     record,
     predict: getPredictions,
     clearCache: async () => {
-      if (precogCache) await caches.delete(CACHE_NAME);
+      if (precogCache) {
+        await caches.delete(CACHE_NAME);
+        precogCache = await caches.open(CACHE_NAME);
+      }
+    },
+    // reset clears all navigation history, fallback transitions, and CacheStorage (useful on user logout)
+    reset: async () => {
+      lastRoute = null;
+      fallbackTransitions.clear();
+      if (precogCache) {
+        await caches.delete(CACHE_NAME);
+        precogCache = await caches.open(CACHE_NAME);
+      }
     }
   };
 

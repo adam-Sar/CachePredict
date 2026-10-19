@@ -14,6 +14,27 @@ type ResponseEntry struct {
 	StatusCode  int
 	CreatedAt   time.Time
 	ExpiresAt   time.Time
+	Vary        map[string]string // request headers recorded from response Vary
+}
+
+// MatchesVary returns true if the incoming request headers match the recorded Vary headers of this cached entry.
+func (e *ResponseEntry) MatchesVary(r *http.Request) bool {
+	if e == nil {
+		return false
+	}
+	// If response had Vary: *, RFC 9111 says it can never match a subsequent request
+	if e.Header.Get("Vary") == "*" {
+		return false
+	}
+	if len(e.Vary) == 0 {
+		return true
+	}
+	for headerName, expectedVal := range e.Vary {
+		if r.Header.Get(headerName) != expectedVal {
+			return false
+		}
+	}
+	return true
 }
 
 // Store defines the cache storage interface for Precog.

@@ -60,16 +60,19 @@ Wrap your router with `engine.Handler(mux)` — it works with `net/http`, Chi, E
 
 Responses carry an `X-Cache: HIT|MISS` header so you can observe what's happening.
 
-## Caching policy
+## Caching policy & Security boundaries
 
-Precog only caches when it is safe to do so:
+Precog only caches and coalesces when it is provably safe to do so:
 
-- Only `GET`/`HEAD` requests are cached or coalesced; everything else passes straight through.
-- Only `200 OK` responses are stored.
-- Responses with `Set-Cookie` are never shared-cached (RFC 9111 §3.5).
-- `Cache-Control: no-store` and `private` are respected. Responses to authenticated requests (`Authorization`, API tokens, or session cookies) are only cached when the handler explicitly declares `Cache-Control: public`.
-- Original response headers (ETag, Content-Type, custom headers) are preserved on hits.
-- Predicted endpoints are advertised to browsers via `Link: <url>; rel=prefetch` headers.
+- **Method Safety**: Only `GET`/`HEAD` requests are cached or coalesced; all other methods pass straight through.
+- **Status & Headers**: Only `200 OK` responses are stored. Responses with `Set-Cookie` are **never** shared-cached (RFC 9111 §3.5) and are never shared across coalesced callers.
+- **Authentication Isolation**: Requests carrying credentials (`Authorization`, API tokens, or session cookies) bypass the shared cache and in-flight coalescing by default. They can only be shared if declared in `PublicRoutes` or if the upstream handler explicitly declares `Cache-Control: public`.
+- **Cross-User Coalescing Defense**: Private or unshareable responses are never delivered to waiting followers; waiters automatically fall back to independent upstream execution.
+- **Client Directives**: Client `Cache-Control: no-cache, no-store, max-age=0` and `Pragma: no-cache` are fully respected.
+- **Virtual Host Isolation**: Cache keys incorporate the request `Host` to prevent cross-tenant cache pollution in multi-tenant environments.
+- **Vary Header Support**: RFC 9111 §4.1 compliant secondary keying. Responses with `Vary: *` are never cached. Responses with `Vary: Accept-Encoding` or other headers are stored under variant keys and verified on subsequent lookups.
+- **Streaming & SSE**: Server-Sent Events (`text/event-stream`), WebSockets, chunked transfers, and `http.Flusher`/`http.Hijacker` interfaces bypass caching and stream without buffering.
+- **Oversized Response Protection**: Responses exceeding `MaxResponseSize` (default: 2MB) stream through directly to protect server memory.
 
 ## Sessions
 
@@ -100,6 +103,18 @@ engine, err := precog.New(precog.Config{
 		MaxRoutes: 1024,
 	}),
 
+	// Path prefixes guaranteed to be public catalog/reference data.
+	// Eligible for shared caching and coalescing even if authentication headers exist.
+	PublicRoutes: []string{"/api/catalog", "/api/products"},
+
+	// Maximum response body size eligible for in-memory caching.
+	// Responses larger than this bypass caching and stream directly. Default: 2MB
+	MaxResponseSize: 2 * 1024 * 1024,
+
+	// Isolated coalescing for authenticated requests (scoped strictly per-user).
+	// Default: false (authenticated requests bypass coalescing for strict security).
+	CoalesceAuthenticated: false,
+
 	// Cookie name for session tracking. Default: "precog_sid"
 	SessionCookieName: "precog_sid",
 
@@ -111,14 +126,12 @@ engine, err := precog.New(precog.Config{
 
 	// Optional custom authentication detector. By default, requests with Authorization,
 	// Proxy-Authorization, API token headers, or cookies other than SessionCookieName
-	// are treated as authenticated and will not receive/populate shared cache without
-	// an explicit Cache-Control: public header.
+	// are treated as authenticated.
 	IsAuthenticated: func(r *http.Request) bool {
 		return r.Header.Get("Authorization") != "" || r.Header.Get("X-User-Token") != ""
 	},
 
 	// Whitelist specific cookie names that represent authenticated sessions.
-	// If empty, any cookie other than SessionCookieName is considered an auth credential.
 	AuthCookieNames: []string{"session_id", "jwt"},
 
 	// Path prefixes never cached or prefetched.
@@ -139,80 +152,35 @@ Precog serves its client SDK at `/precog/precog.js`. Include it in your HTML:
 
 The SDK automatically:
 
-1. Loads the WebAssembly predictor from `/precog/precog.wasm` (the Go runtime glue at `/precog/wasm_exec.js` is served too; if the module isn't deployed, a lightweight JS tracker is used instead).
+1. Loads the WebAssembly predictor from `/precog/precog.wasm` (or runs the lightweight JS tracker fallback).
 2. Intercepts `fetch()` calls and link hovers to learn navigation patterns.
 3. Pre-fetches predicted URLs into the browser's `CacheStorage` for zero-latency repeat requests.
-4. Injects W3C Speculation Rules for Chromium-native prefetching.
-
-A minimal JS fallback predictor is exposed as `window.Precog.record/predict/clearCache`.
-
-## Compiling the WebAssembly module
-
-```bash
-# Windows
-.\build_wasm.bat
-
-# Linux / macOS
-./build_wasm.sh
-```
-
-Place the resulting `precog.wasm` in your server's working directory; Precog serves it at `/precog/precog.wasm` with the correct `application/wasm` content type.
-
-## Custom stores and predictors
-
-Implement the `Store` interface to plug in your own backend (Redis, disk, etc.):
-
-```go
-type Store interface {
-	Get(key string) (*ResponseEntry, bool)
-	Set(key string, entry *ResponseEntry, ttl time.Duration) bool
-	Del(key string)
-	Close() error
-}
-```
-
-Built-in options: `NewTieredStore` (default), `NewShardedStore`, `NewMemoryStore`, `NewRistrettoStore` (TinyLFU eviction).
-
-Implement the `Predictor` interface for custom prediction logic. `NewAdaptiveMarkovPredictor` is a map-based alternative to the default dense matrix, and supports `SeedTransition(from, to, weight)` to bootstrap known flows:
-
-```go
-p := precog.NewAdaptiveMarkovPredictor()
-p.SeedTransition("GET /api/products/:id", "GET /api/cart", 10)
-```
-
-## Telemetry
-
-```go
-stats := engine.Stats()
-fmt.Printf("Hit rate: %.2f%%\n", stats.HitRate*100)
-fmt.Printf("Prefetches executed: %d\n", stats.PrefetchesExecuted)
-fmt.Printf("Cache hits: %d / %d requests\n", stats.CacheHits, stats.TotalRequests)
-```
-
-## Testing your integration
-
-The repo ships a self-contained instrumented server (`cmd/testserver`) with fake DB latency and handler-call counters, plus an end-to-end smoke suite:
-
-```bash
-go run ./cmd/testserver                # routes on :8099
-powershell -ExecutionPolicy Bypass -File scripts\smoke.ps1
-```
-
-The smoke suite asserts caching, pre-warming, coalescing, POST pass-through and Set-Cookie isolation over real HTTP — a useful template for verifying your own deployment.
+4. Strictly inspects response `Cache-Control` (`private` and `no-store` responses and `Set-Cookie` are **never** stored in browser `CacheStorage`).
+5. Injects W3C Speculation Rules for Chromium-native prefetching.
+6. Honors `data-precog-skip` and `rel="nofollow"` attributes on links to prevent speculative prefetching.
+7. Exposes `window.Precog.reset()` to invalidate all browser cache entries upon user logout.
 
 ## Benchmarks
 
 Measured on an Intel Core i7-1165G7 @ 2.80GHz (`go test -bench . -benchmem`):
 
+### Core Caching & Modeling Primitives
 | Benchmark Component | Speed / Op | Allocations | Memory / Op |
 | :--- | :--- | :--- | :--- |
-| **TieredStore L1 Atomic Hit** | **4.67 ns/op** | **0 allocs/op** | **0 B/op** |
-| **EndpointRegistry Route Lookup** | **8.16 ns/op** | **0 allocs/op** | **0 B/op** |
-| **FastHash64 (Bare Path)** | **32.5 ns/op** | **0 allocs/op** | **0 B/op** |
-| **FastHash64 (Multi-Param Query)** | **221.2 ns/op** | **1 allocs/op** | **64 B/op** |
-| **ShardedStore Parallel Read (256 Shards)**| **107.4 ns/op** | **5 allocs/op** | **199 B/op** |
-| **Dense Matrix Predictor Query** | **386.1 ns/op** | **6 allocs/op** | **280 B/op** |
-| **Dense Matrix Lock-Free Record** | **528.5 ns/op** | **13 allocs/op** | **295 B/op** |
+| **TieredStore L1 Atomic Hit** | **4.50 ns/op** | **0 allocs/op** | **0 B/op** |
+| **EndpointRegistry Route Lookup** | **7.41 ns/op** | **0 allocs/op** | **0 B/op** |
+| **FastHash64 (Bare Path)** | **33.37 ns/op** | **0 allocs/op** | **0 B/op** |
+| **FastHash64 (Multi-Param Query)** | **188.2 ns/op** | **1 allocs/op** | **64 B/op** |
+| **ShardedStore Parallel Read (256 Shards)**| **97.55 ns/op** | **5 allocs/op** | **199 B/op** |
+| **Dense Matrix Predictor Query** | **508.7 ns/op** | **6 allocs/op** | **280 B/op** |
+| **Dense Matrix Lock-Free Record** | **864.0 ns/op** | **13 allocs/op** | **295 B/op** |
+
+### Complete End-to-End HTTP Middleware Stack
+| End-to-End HTTP Benchmark | Speed / Op | Throughput | Allocations / Op |
+| :--- | :--- | :--- | :--- |
+| **HTTP Middleware Parallel Cache Hits** | **2.08 µs/op** | **~480,000 req/sec** | **30 allocs/op (1640 B)** |
+| **HTTP Middleware Single Cache Hit** | **5.00 µs/op** | **~200,000 req/sec** | **30 allocs/op (1661 B)** |
+| **HTTP In-Flight Request Coalescing** | **4.81 µs/op** | **~207,000 req/sec** | **39 allocs/op (6788 B)** |
 
 ## License
 
