@@ -206,13 +206,13 @@ Measured on an Intel Core i7-1165G7 @ 2.80GHz (`go test -bench . -benchmem`):
 
 | Benchmark Component | Speed / Op | Allocations | Memory / Op |
 | :--- | :--- | :--- | :--- |
-| **TieredStore L1 Atomic Hit** | **5.12 ns/op** | **0 allocs/op** | **0 B/op** |
-| **EndpointRegistry Route Lookup** | **16.4 ns/op** | **0 allocs/op** | **0 B/op** |
-| **FastHash64 (Bare Path)** | **56.7 ns/op** | **0 allocs/op** | **0 B/op** |
-| **FastHash64 (Multi-Param Query)** | **310.7 ns/op** | **1 allocs/op** | **64 B/op** |
-| **ShardedStore Parallel Read (256 Shards)**| **84.3 ns/op** | **4 allocs/op** | **151 B/op** |
-| **Dense Matrix Predictor Query** | **849.2 ns/op** | **6 allocs/op** | **280 B/op** |
-| **Dense Matrix Lock-Free Record** | **547.2 ns/op** | **13 allocs/op** | **294 B/op** |
+| **TieredStore L1 Atomic Hit** | **4.67 ns/op** | **0 allocs/op** | **0 B/op** |
+| **EndpointRegistry Route Lookup** | **8.16 ns/op** | **0 allocs/op** | **0 B/op** |
+| **FastHash64 (Bare Path)** | **32.5 ns/op** | **0 allocs/op** | **0 B/op** |
+| **FastHash64 (Multi-Param Query)** | **221.2 ns/op** | **1 allocs/op** | **64 B/op** |
+| **ShardedStore Parallel Read (256 Shards)**| **107.4 ns/op** | **5 allocs/op** | **199 B/op** |
+| **Dense Matrix Predictor Query** | **386.1 ns/op** | **6 allocs/op** | **280 B/op** |
+| **Dense Matrix Lock-Free Record** | **528.5 ns/op** | **13 allocs/op** | **295 B/op** |
 
 ## License
 
