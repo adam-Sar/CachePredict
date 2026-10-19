@@ -114,7 +114,9 @@ func (p *DenseMatrixPredictor) Record(sessionID string, method, path, rawQuery s
 		query:    rawQuery,
 	}
 
-	if !strings.Contains(path, ":id") && !strings.Contains(path, ":uuid") && !strings.Contains(path, ":hex") {
+	// Only cache concrete paths for purely static routes (routes with no parameters).
+	// Parameterized routes (:id, :uuid, :hex) must never be globally cached to prevent cross-session leaks.
+	if !strings.Contains(pattern, ":id") && !strings.Contains(pattern, ":uuid") && !strings.Contains(pattern, ":hex") {
 		p.concreteMu.Lock()
 		p.concrete[toID] = concrete
 		p.concreteMu.Unlock()
@@ -240,51 +242,66 @@ func (p *DenseMatrixPredictor) hydrateCall(candToID uint16, pattern string, last
 
 	call := method + " " + pathPattern
 
-	var activeID string
-	// Check lastStep.path for ID
+	var activeNumID string
+	var activeUUID string
+	var activeHexID string
+
+	// 1. Extract IDs from lastStep.path segments (from right to left)
 	segments := strings.Split(lastStep.path, "/")
 	for i := len(segments) - 1; i >= 0; i-- {
 		seg := segments[i]
 		if seg == "" {
 			continue
 		}
-		if isNumeric(seg) {
-			activeID = seg
-			break
+		if activeNumID == "" && isNumeric(seg) {
+			activeNumID = seg
+		}
+		if activeUUID == "" && isUUID(seg) {
+			activeUUID = seg
+		}
+		if activeHexID == "" && isHexID(seg) {
+			activeHexID = seg
 		}
 	}
 
-	// Also check lastStep.query for product_id or id
-	if activeID == "" && lastStep.query != "" {
+	// 2. Extract IDs from lastStep.query parameters
+	if (activeNumID == "" || activeUUID == "" || activeHexID == "") && lastStep.query != "" {
 		for _, qp := range strings.Split(lastStep.query, "&") {
 			kv := strings.SplitN(qp, "=", 2)
-			if len(kv) == 2 && (kv[0] == "id" || kv[0] == "product_id") && isNumeric(kv[1]) {
-				activeID = kv[1]
-				break
+			if len(kv) == 2 {
+				val := kv[1]
+				if activeNumID == "" && (kv[0] == "id" || kv[0] == "product_id" || kv[0] == "order_id" || kv[0] == "item_id") && isNumeric(val) {
+					activeNumID = val
+				}
+				if activeUUID == "" && isUUID(val) {
+					activeUUID = val
+				}
+				if activeHexID == "" && isHexID(val) {
+					activeHexID = val
+				}
 			}
 		}
 	}
 
-	if activeID != "" && strings.Contains(call, ":id") {
-		call = strings.Replace(call, ":id", activeID, 1)
+	// 3. Hydrate placeholders from the active session context
+	if activeNumID != "" && strings.Contains(call, ":id") {
+		call = strings.Replace(call, ":id", activeNumID, 1)
+	}
+	if activeUUID != "" && strings.Contains(call, ":uuid") {
+		call = strings.Replace(call, ":uuid", activeUUID, 1)
+	}
+	if activeHexID != "" && strings.Contains(call, ":hex") {
+		call = strings.Replace(call, ":hex", activeHexID, 1)
 	}
 
-	// If call still has :id, :uuid, :hex, check concrete cache
-	if strings.Contains(call, ":id") || strings.Contains(call, ":uuid") || strings.Contains(call, ":hex") {
+	// 4. For purely static routes (routes with NO placeholders), if there is a known static concrete URL
+	// with query parameters from p.concrete, we can carry forward the query context safely.
+	// We deliberately NEVER look up in p.concrete for parameterized routes to prevent cross-session ID leaks.
+	if !strings.Contains(pattern, ":id") && !strings.Contains(pattern, ":uuid") && !strings.Contains(pattern, ":hex") {
 		p.concreteMu.RLock()
 		known := p.concrete[candToID]
 		p.concreteMu.RUnlock()
-		if known != "" {
-			call = known
-		}
-	}
-
-	// Carry forward query context from a previously observed concrete call
-	if !strings.Contains(call, "?") {
-		p.concreteMu.RLock()
-		known := p.concrete[candToID]
-		p.concreteMu.RUnlock()
-		if known != "" && strings.Contains(known, "?") {
+		if known != "" && !strings.Contains(call, "?") && strings.Contains(known, "?") {
 			qIdx := strings.Index(known, "?")
 			call += known[qIdx:]
 		}

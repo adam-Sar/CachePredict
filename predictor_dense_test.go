@@ -115,3 +115,53 @@ func TestDenseMatrixPredictorUUIDAndHexHydration(t *testing.T) {
 		t.Errorf("expected hydrated Hex call %s, got %s", expectedHexCall, predsHex[0].Call)
 	}
 }
+
+func TestDenseMatrixPredictorNoCrossSessionIDLeak(t *testing.T) {
+	p := precog.NewDenseMatrixPredictor(&precog.DensePredictorConfig{
+		MaxRoutes: 128,
+	})
+
+	// User A visits their private order /orders/99999 then /orders/99999/invoice
+	userA := "session_alice"
+	p.Record(userA, "GET", "/orders/99999", "")
+	p.Record(userA, "GET", "/orders/99999/invoice", "")
+	p.Record(userA, "GET", "/orders/99999", "")
+
+	// Verify User A gets their own hydrated order ID
+	predsA := p.Predict(userA, 1)
+	if len(predsA) == 0 || predsA[0].Call != "GET /orders/99999/invoice" {
+		t.Fatalf("expected Alice to get their own invoice, got %v", predsA)
+	}
+
+	// User B visits /orders/77777 (their own order)
+	userB := "session_bob"
+	p.Record(userB, "GET", "/orders/77777", "")
+
+	// User B's prediction MUST be hydrated with Bob's order (77777), NEVER Alice's order (99999)!
+	predsB := p.Predict(userB, 1)
+	if len(predsB) == 0 {
+		t.Fatalf("expected predictions for Bob")
+	}
+	if predsB[0].Call == "GET /orders/99999/invoice" {
+		t.Fatalf("CRITICAL PRIVACY LEAK: Bob received Alice's private order ID: %s", predsB[0].Call)
+	}
+	if predsB[0].Call != "GET /orders/77777/invoice" {
+		t.Errorf("expected Bob's call to be hydrated with 77777, got %s", predsB[0].Call)
+	}
+
+	// User C has a session at /catalog (no order ID context)
+	userC := "session_charlie"
+	// Train a transition from /catalog to /orders/:id/invoice
+	p.Record(userC, "GET", "/catalog", "")
+	p.Record(userA, "GET", "/catalog", "")
+	p.Record(userA, "GET", "/orders/99999/invoice", "")
+	p.Record(userC, "GET", "/catalog", "")
+
+	predsC := p.Predict(userC, 1)
+	if len(predsC) > 0 {
+		// Charlie must NEVER receive Alice's order ID (99999)
+		if predsC[0].Call == "GET /orders/99999/invoice" {
+			t.Fatalf("CRITICAL PRIVACY LEAK: Charlie received Alice's concrete order ID without having an ID: %s", predsC[0].Call)
+		}
+	}
+}

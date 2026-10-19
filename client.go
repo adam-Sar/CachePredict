@@ -76,6 +76,10 @@ func BuildSpeculationRulesHeader(predictions []Prediction) string {
 		if len(callParts) == 2 {
 			url = callParts[1]
 		}
+		// Skip URLs with unhydrated route placeholders
+		if strings.Contains(url, ":id") || strings.Contains(url, ":uuid") || strings.Contains(url, ":hex") {
+			continue
+		}
 		if strings.HasPrefix(url, "/") {
 			parts = append(parts, "<"+url+">; rel=prefetch")
 		}

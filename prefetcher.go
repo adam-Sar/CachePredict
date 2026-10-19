@@ -149,6 +149,11 @@ func (p *Prefetcher) execute(job PrefetchJob) {
 		return
 	}
 
+	// Never speculatively prefetch unhydrated route placeholders
+	if strings.Contains(targetURI, ":id") || strings.Contains(targetURI, ":uuid") || strings.Contains(targetURI, ":hex") {
+		return
+	}
+
 	targetPath := targetURI
 	rawQuery := ""
 	if qIdx := strings.Index(targetURI, "?"); qIdx >= 0 {
