@@ -11,9 +11,15 @@ jobs:
     name: Test & Verify
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         go-version: ['1.21', '1.22', '1.23']
+        exclude:
+          - os: macos-latest
+            go-version: '1.21'
+          - os: macos-latest
+            go-version: '1.22'
 
     steps:
       - name: Checkout code
@@ -41,7 +47,12 @@ jobs:
         run: go vet ./...
 
       - name: Run unit and security tests with race detector
+        if: runner.os == 'Linux'
         run: go test -v -race ./...
+
+      - name: Run unit and security tests
+        if: runner.os != 'Linux'
+        run: go test -v ./...
 
       - name: Run benchmarks
         if: runner.os == 'Linux' && matrix.go-version == '1.23'

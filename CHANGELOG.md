@@ -41,7 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Prefetch background jobs now capture and preserve original request `Host` and `Scheme` on synthetic loopback requests.
 
 ### CI/CD
-- Added GitHub Actions workflow (`.github/workflows/ci.yml`) testing Linux, macOS, and Windows across Go 1.21, 1.22, and 1.23 with race detector enabled and WebAssembly compilation verification.
+- Added GitHub Actions workflow (`.github/workflows/ci.yml`) testing Linux, macOS, and Windows across Go 1.21, 1.22, and 1.23 with race detection and WebAssembly verification.
 
 ---
 

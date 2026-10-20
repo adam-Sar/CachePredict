@@ -32,11 +32,11 @@ node_modules/
 dist/
 out/
 
-# WASM build artifact (compile via build_wasm.bat / build_wasm.sh)
 precog.wasm
 
-# Demo application (not part of the package)
+# Local scratch and playground directories
 demo/
-
-# A/B comparison playground (not part of the package)
 compare/
+AUDIT.md
+*.bak
+*.tmp
